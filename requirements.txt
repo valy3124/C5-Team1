@@ -1,0 +1,17 @@
+numpy
+opencv-python
+scikit-learn
+pillow
+matplotlib
+tqdm
+wandb
+torchviz
+nvitop
+
+# Session 1
+transformers
+huggingface_hub
+ultralytics
+pycocotools
+albumentations
+thop # For calculating FLOPs
