@@ -42,7 +42,7 @@ class KITTIMOTS:
     def __init__(
         self,
         root: Union[str, Path] = "~/mcv/datasets/C5/KITTI-MOTS/",
-        split: Literal["dev", "validation"] = "dev",
+        split: Literal["train", "validation"] = "train",
         ann_source: Literal["png", "txt"] = "txt",
         id_divisor: int = 1000,
         compute_boxes: bool = True,
@@ -102,7 +102,7 @@ class KITTIMOTS:
 
             is_val_seq = (seq_int in self.VALIDATION_SEQS)
 
-            if self.split == "dev":
+            if self.split == "train":
                 if is_val_seq:
                     continue
             
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     # Instantiate the class, will be fed with the png masks and will compute bboxes
     ds = KITTIMOTS(
         root=ROOT,
-        split="dev",
+        split="train",
         ann_source="png",
         compute_boxes=True,
     )
