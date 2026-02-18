@@ -80,8 +80,6 @@ def build_model(args: argparse.Namespace) -> Any:
     if name == "yolo":
         return UltralyticsYOLO(
             weights=args.weights,
-            version=args.version,
-            task="detect",
             conf=args.conf,
             device=args.device,
             half=args.half
@@ -164,7 +162,6 @@ def parse_args():
     # Model arguments
     parser.add_argument("--model", type=str, required=True, help="Model type: faster_rcnn, detr, yolo")
     parser.add_argument("--weights", type=str, default=None, help="Path to weights (default: pre-trained weights of COCO)")
-    parser.add_argument("--version",type=str,default="yolov8n.pt",help="Default YOLO model version to use if weights is not provided ")
     parser.add_argument("--conf", type=float, default=0.0, help="Confidence threshold")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--half", action="store_true", help="Use FP16")

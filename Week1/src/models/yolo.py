@@ -2,7 +2,7 @@
 Ultralytics YOLO inference wrapper.
 
 Provides the code for running inference
-with Ultralytics YOLO models (task = object detection in this case).
+with Ultralytics YOLO models
 """
 
 from __future__ import annotations
@@ -20,11 +20,6 @@ class UltralyticsYOLO:
     -----
     weights : Optional[str]
         Path to model weights (can be the fine-tuned ones by us or the original)
-    version : Optional[str]
-        Name of the default YOLO model weights to load when `weights` is None
-        Default: Yolo V8 nano using pretrained COCO weights
-    task : Literal["detect", "segment"]
-        Type of task (in this project we use "detect")
     conf : float
         Confidence threshold
     iou : float
@@ -38,21 +33,19 @@ class UltralyticsYOLO:
     def __init__(
         self,
         weights: Optional[str] = None,
-        version: Optional[str] = "yolov8n.pt",
-        task: Literal["detect", "segment"] = "detect",
         conf: float = 0.25,
         iou: float = 0.7,
         device: str = "0",
         half: bool = False,
     ) -> None:
-        self.task = task
         self.conf = conf
         self.iou = iou
         self.device = device
         self.half = half
 
+        # Default model: YOLOv8 small pretrained on COCO
         if weights is None:
-            weights = version
+            weights = "yolov8s.pt"
         
         self.model: YOLO = YOLO(weights)
 
@@ -106,7 +99,7 @@ class UltralyticsYOLO:
         )
 
         return {
-            "bboxes_xyxy": boxes_xyxy,
-            "scores": scores,
-            "category_ids": classes
+            "bboxes_xyxy": result.boxes.xyxy.detach().cpu().numpy().astype(np.float32),
+            "scores": result.boxes.conf.detach().cpu().numpy().astype(np.float32),
+            "category_ids": result.boxes.cls.detach().cpu().numpy().astype(np.int64),
         }
