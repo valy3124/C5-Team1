@@ -48,6 +48,17 @@ def _to_jsonable_pred(image_id: int, pred: Dict[str, Any]) -> Dict[str, Any]:
         "category_ids": category_ids.tolist()
     }
 
+def post_process(pred: Dict[str, Any], max_det: int) -> Dict[str, Any]:
+    """
+    Post-process raw model predictions by keeping only KITTI-MOTS classes and top `max_det` detections per image.
+    """
+    # TODO
+    if len(result["scores"]) > self.max_det:
+        top_k_indices = torch.topk(results["scores"], k=self.max_det).indices
+        result["scores"] = result["scores"][top_k_indices]
+        result["labels"] = result["labels"][top_k_indices]
+        result["boxes"] = result["boxes"][top_k_indices]
+
 def build_model(args: argparse.Namespace) -> Any:
     name = args.model.lower()
 
@@ -57,8 +68,7 @@ def build_model(args: argparse.Namespace) -> Any:
             task="detect",
             conf=args.conf,
             device=args.device,
-            half=args.half,
-            max_det=args.max_det,
+            half=args.half
         )
     
     elif name == "detr":
@@ -66,8 +76,7 @@ def build_model(args: argparse.Namespace) -> Any:
             weights=args.weights,
             conf=args.conf,
             device=args.device,
-            half=args.half,
-            max_det=args.max_det
+            half=args.half
         )
     
     elif name == "faster_rcnn":
@@ -82,6 +91,7 @@ def run_inference(
     ann_source: str,
     output: str,
     model: Any,
+    max_det: int = 100,
     limit: Optional[int] = None,
 ) -> None:
     """
@@ -99,6 +109,8 @@ def run_inference(
         Output JSONL file path.
     model : Any
         Any model object exposing predict(PIL.Image)->dict.
+    max_det : int
+        Maximum number of detections to keep per image (ordered by confidence).
     limit : Optional[int]
         If provided, process only the first `limit` frames.
     """
@@ -109,10 +121,12 @@ def run_inference(
 
     n = len(ds) if limit is None else min(limit, len(ds))
 
+    print(f"Starting inference on {n} frames using model {type(model).__name__}...")
     with out_path.open("w", encoding="utf-8") as f:
         for i in range(n):
             img, _, _ = ds[i]
             pred = model.predict(img)
+            pred = post_process(pred, max_det)
             f.write(json.dumps(_to_jsonable_pred(i, pred)) + "\n")
 
             if (i + 1) % 100 == 0:
@@ -128,15 +142,15 @@ def parse_args():
     parser.add_argument("--split", type=str, default="training", help="training or testing")
     parser.add_argument("--ann_source", type=str, default="txt", help="Annotation source (txt/png)")
     parser.add_argument("--output", type=str, required=True, help="Output JSONL path")
-    parser.add_argument("--limit", type=int, default=300, help="Limit number of frames for debugging")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of frames for debugging")
+    parser.add_argument("--max_det", type=int, default=100, help="Limit number of (valid) detections per image (COCO metrics only use top 100)")
 
     # Model arguments
     parser.add_argument("--model", type=str, required=True, help="Model type: faster_rcnn, detr, yolo")
     parser.add_argument("--weights", type=str, default=None, help="Path to weights (default: pre-trained weights of COCO)")
-    parser.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
+    parser.add_argument("--conf", type=float, default=0.0, help="Confidence threshold")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--half", action="store_true", help="Use FP16")
-    parser.add_argument("--max_det", type=int, default=100, help="Limit number of detections per image (COCO metrics only use top 100)")
     
     return parser.parse_args()
 
