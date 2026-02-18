@@ -195,6 +195,15 @@ class KITTIMOTS:
         return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
 
+class DEArt:
+    """
+    DEArt dataset wrapper.
+
+    __getitem__ returns:
+      (PIL.Image RGB, list[InstanceAnn])
+    """
+    
+# TODO: IMPLEMENT THE DEART DATASET READER + SPLIT WITH FIXED SEED + UTILS AS IN KITTI-MOTS
 
 if __name__ == "__main__":
     import random
