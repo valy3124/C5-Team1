@@ -1,0 +1,19 @@
+project: "kitti-mots-finetune"
+experiment_name: "faster_rcnn_baseline"
+output_dir: "results"
+
+data:
+  root: "~/mcv/datasets/C5/KITTI-MOTS/"
+  num_workers: 4
+
+model:
+  name: "faster_rcnn" # Options: faster_rcnn, yolo, detr
+  weights: "fasterrcnn_mobilenet_v3_large_fpn" # or yolov8n.pt for YOLO
+
+training:
+  epochs: 10
+  batch_size: 4
+  lr: 0.005
+  train_backbone: false
+
+debug: false
