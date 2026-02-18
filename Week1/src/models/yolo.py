@@ -20,6 +20,9 @@ class UltralyticsYOLO:
     -----
     weights : Optional[str]
         Path to model weights (can be the fine-tuned ones by us or the original)
+    version : Optional[str]
+        Name of the default YOLO model weights to load when `weights` is None
+        Default: Yolo V8 nano using pretrained COCO weights
     task : Literal["detect", "segment"]
         Type of task (in this project we use "detect")
     conf : float
@@ -35,6 +38,7 @@ class UltralyticsYOLO:
     def __init__(
         self,
         weights: Optional[str] = None,
+        version: Optional[str] = "yolov8n.pt",
         task: Literal["detect", "segment"] = "detect",
         conf: float = 0.25,
         iou: float = 0.7,
@@ -48,8 +52,7 @@ class UltralyticsYOLO:
         self.half = half
 
         if weights is None:
-            # TODO: XAVI
-            raise ValueError("IMPLEMENT A DEFAULT FOR YOLO! (EASIER FOR INFERENCE IF WE DON'T HAVE IT DOWNLOADED)")
+            weights = version
         
         self.model: YOLO = YOLO(weights)
 
