@@ -22,10 +22,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import wandb
 from pathlib import Path
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
 
 # --- 3. Project Imports ---
-from models import faster_rcnn
 import datasets
+from models.faster_rcnn import (get_transforms, 
+                                ApplyAlbumentations, 
+                                KITTIMOTSToTorchvision,FasterRCNNModel)
 
 
 
@@ -45,7 +49,7 @@ class Data:
 
     classes: List[str]           # List of class names
     train_loader: Any            # DataLoader for the training set
-    test_loader: Any             # DataLoader for the test set
+    val_loader: Any              # DataLoader for the val set
 
 
 @dataclass
@@ -54,8 +58,8 @@ class Run:
 
     model: Any                   # Neural network model instance
     optimizer: Any               # Optimizer instance
-    scheduler: Any = None        # Optional scheduler
     history: Dict[str, list]     # Dictionary storing training and test metrics
+    scheduler: Any = None        # Optional scheduler
     best_map: float = 0.0        # Best mAP achieved so far
     best_epoch: int = 0          # Epoch corresponding to best mAP
 
@@ -66,21 +70,11 @@ class Eval:
     predictions: List[Dict]
     metrics: Dict[str, float]
 
-def get_transforms(cfg, is_train=True):
-    if is_train:
-        return A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.ColorJitter(p=0.2),
-            ToTensorV2()
-        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
-    else:
-        return A.Compose([
-            ToTensorV2()
-        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
 
 def collate_fn(batch):
     images, targets = zip(*batch)
     return list(images), list(targets)
+
 
 def setup_experiment(config_path: str) -> Exp:
     """Initialize experiment configuration, logging, and environment.
@@ -112,6 +106,7 @@ def setup_experiment(config_path: str) -> Exp:
     best_model_path = os.path.join(output_dir, "best_model.pth")
     return Exp(cfg, device, output_dir, best_model_path)
 
+
 def setup_data(exp: Exp) -> Data:
     """Initialize datasets and data loaders (Train and Test only).
 
@@ -126,26 +121,50 @@ def setup_data(exp: Exp) -> Data:
     root = cfg['data']['root'] 
     
     # Data loading
-    train_ds_base = datasets.KITTIMOTS(root, split="training", ann_source="txt")
-    train_dataset = KITTIMOTSTorchvisionAdapter(train_ds_base, albumentations_tf=get_transforms(cfg, True))
+    train_base = datasets.KITTIMOTS(root, split="train", ann_source="txt")
+    train_ds = ApplyAlbumentations(KITTIMOTSToTorchvision(train_base), tf=get_transforms(True))
 
-    val_ds_base = datasets.KITTIMOTS(root, split="testing")
-    val_dataset = KITTIMOTSTorchvisionAdapter(val_ds_base, albumentations_tf=get_transforms(cfg, False))
+    val_base = datasets.KITTIMOTS(root, split="validation")
+    val_ds = ApplyAlbumentations(KITTIMOTSToTorchvision(val_base), tf=get_transforms(False))
 
-    print(f"Data Loaded: {len(train_dataset)} Train, {len(val_dataset)} Test")
+    print(f"Data Loaded: {len(train_ds)} Train, {len(val_ds)} Val")
 
-    train_loader = DataLoader(train_dataset, 
+    train_loader = DataLoader(train_ds, 
                               batch_size=cfg['training']['batch_size'], 
                               shuffle=True, collate_fn=collate_fn, 
                               num_workers=cfg['data'].get('num_workers', 4))
     
-    test_loader = DataLoader(val_dataset, 
+    val_loader = DataLoader(val_ds, 
                             batch_size=1, 
                             shuffle=False, collate_fn=collate_fn, 
                             num_workers=cfg['data'].get('num_workers', 4))
     
-    classes = ["Background", "Car", "Pedestrian"] # TODO: Check and change this to the actual class names
-    return Data(classes, train_loader, test_loader)
+    classes = ["Background", "Car", "Pedestrian"]
+    return Data(classes, train_loader, val_loader)
+
+
+def build_scheduler(optimizer, cfg):
+    sch_cfg = cfg["training"].get("scheduler")
+    if sch_cfg is None:
+        return None
+    
+    name = sch_cfg.get("name", "none").lower()
+
+    if name in ["none", "null"]:
+        return None
+
+    if name in ["step", "steplr"]:
+        step_size = sch_cfg.get("step_size", 3)
+        gamma = sch_cfg.get("gamma", 0.1)
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+
+    if name in ["cosine", "cosineannealing", "cosineannealinglr"]:
+        T_max = sch_cfg.get("t_max", cfg["training"].get("epochs", 10))
+        eta_min = sch_cfg.get("eta_min", 0.0)
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+
+    raise ValueError(f"Unknown scheduler: {name}")
+
 
 def setup_model(exp: Exp, data: Data) -> Run:
     """Initialize model and optimizer.
@@ -157,7 +176,6 @@ def setup_model(exp: Exp, data: Data) -> Run:
     Returns:
         Run object containing model and optimizer.
     """
-    
     cfg = exp.cfg
     device = exp.device
     model_name = cfg['model']['name']
@@ -166,30 +184,17 @@ def setup_model(exp: Exp, data: Data) -> Run:
     
     if model_name == "faster_rcnn":        
         # Initialize the wrapper (loads backbone/weights)
-        model_wrapper = faster_rcnn.FasterRCNNModel(device=str(device))
-        model = model_wrapper.model
-        
-        # --- Manual Surgery to match fine_tune logic ---
-        from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-        
-        # Replace the head
-        num_classes = len(data.classes) # 3: BG, Car, Ped
-        in_features = model.roi_heads.box_predictor.cls_score.in_features
-        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-        
-        # Freeze backbone?
+        model = FasterRCNNModel(device=str(device))
+        num_classes = len(data.classes)
         train_backbone = cfg['training'].get('train_backbone', False)
-        for p in model.backbone.parameters():
-            p.requires_grad = train_backbone
-            
-        model.to(device)
-
+        model.prepare_finetune(num_classes, train_backbone)
+        
         # Optimizer
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = optim.AdamW(params, lr=cfg['training']['lr'])
         
-        # Scheduler TODO: modify later
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
+        # Scheduler
+        scheduler = build_scheduler(optimizer, cfg)
 
     elif model_name == "detr":
         # TODO: Wait for DeTR implementation
@@ -204,14 +209,129 @@ def setup_model(exp: Exp, data: Data) -> Run:
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
-    history = {'train_loss': [], 'train_map': [], 'test_loss': [], 'test_map': []}
+    history = {'train_loss': [], 'train_map': [], 'val_loss': [], 'val_map': []}
     
     return Run(model, optimizer, history, scheduler, best_map=0.0, best_epoch=0)
 
+
+def _to_xywh(box_xyxy):
+    x1, y1, x2, y2 = box_xyxy
+    return [float(x1), float(y1), float(x2 - x1), float(y2 - y1)]
+
+
 def evaluate(exp: Exp, data: Data, run: Run) -> Eval:
-    # mAP Logic removed as requested
-    print("Evaluation/mAP logic disabled for now.")
-    return Eval([], {'map': 0.0})
+    cfg = exp.cfg
+    device = exp.device
+    model = run.model
+    val_loader = data.val_loader
+
+    if model is None:
+        return Eval([], {"coco/AP": 0.0})
+
+    # Load best weights if available
+    if os.path.exists(exp.best_model_path):
+        model.load_state_dict(torch.load(exp.best_model_path, map_location=device))
+
+    model.eval()
+
+    # Build COCO GT dict
+    coco_gt_dict = {
+        "images": [],
+        "annotations": [],
+        "categories": [
+            {"id": 1, "name": "car"},
+            {"id": 2, "name": "pedestrian"},
+        ],
+    }
+
+    coco_dt_list = []
+    ann_id = 1
+
+    with torch.no_grad():
+        for images, targets in tqdm(val_loader, desc="COCO eval"):
+            img = images[0].to(device)
+            tgt = targets[0]
+
+            image_id = int(tgt["image_id"].item())
+            H, W = img.shape[-2], img.shape[-1]
+
+            coco_gt_dict["images"].append({
+                "id": image_id,
+                "width": int(W),
+                "height": int(H),
+                "file_name": str(image_id),
+            })
+
+            # GT annotations
+            gt_boxes = tgt["boxes"].cpu().numpy()
+            gt_labels = tgt["labels"].cpu().numpy()
+
+            for b, c in zip(gt_boxes, gt_labels):
+                # IMPORTANT: COCO category_id must match your label IDs (1,2)
+                cat_id = int(c)
+                if cat_id == 0:
+                    continue  # background should never appear, but just in case
+
+                x, y, w, h = _to_xywh(b)
+                area = float(max(w, 0.0) * max(h, 0.0))
+
+                coco_gt_dict["annotations"].append({
+                    "id": ann_id,
+                    "image_id": image_id,
+                    "category_id": cat_id,
+                    "bbox": [x, y, w, h],
+                    "area": area,
+                    "iscrowd": 0,
+                })
+                ann_id += 1
+
+            # Predictions (no targets in eval)
+            preds = model([img])[0]
+            pb = preds["boxes"].detach().cpu().numpy()
+            pl = preds["labels"].detach().cpu().numpy()
+            ps = preds["scores"].detach().cpu().numpy()
+
+            for b, c, s in zip(pb, pl, ps):
+                cat_id = int(c)
+                x, y, w, h = _to_xywh(b)
+                coco_dt_list.append({
+                    "image_id": image_id,
+                    "category_id": cat_id,
+                    "bbox": [x, y, w, h],
+                    "score": float(s),
+                })
+
+    # Run COCOeval
+    coco_gt = COCO()
+    coco_gt.dataset = coco_gt_dict
+    coco_gt.createIndex()
+
+    coco_dt = coco_gt.loadRes(coco_dt_list) if len(coco_dt_list) else coco_gt.loadRes([])
+
+    coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
+    coco_eval.evaluate()
+    coco_eval.accumulate()
+    coco_eval.summarize()
+
+    stats = coco_eval.stats  # 12 numbers
+    metrics = {
+        "coco/AP": float(stats[0]),         # AP @[.5:.95]
+        "coco/AP50": float(stats[1]),       # AP @0.5
+        "coco/AP75": float(stats[2]),       # AP @0.75
+        "coco/AP_small": float(stats[3]),
+        "coco/AP_medium": float(stats[4]),
+        "coco/AP_large": float(stats[5]),
+        "coco/AR1": float(stats[6]),
+        "coco/AR10": float(stats[7]),
+        "coco/AR100": float(stats[8]),
+        "coco/AR_small": float(stats[9]),
+        "coco/AR_medium": float(stats[10]),
+        "coco/AR_large": float(stats[11]),
+    }
+
+    wandb.log(metrics)
+    return Eval(predictions=coco_dt_list, metrics=metrics)
+
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
     """Train the model and save best model based on mAP.
@@ -225,21 +345,18 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         Run object containing model and optimizer.
     """
     # TODO: check it does not crash with defined models
-
     cfg = exp.cfg
     device = exp.device
     best_model_path = exp.best_model_path
 
     train_loader = data.train_loader
-    test_loader = data.test_loader
+    val_loader = data.val_loader
 
     model = run.model
     optimizer = run.optimizer
     history = run.history
     best_map = run.best_map
     best_epoch = run.best_epoch
-
-    model_name = cfg['model']['name']
     
     if run.model is None:
         print("Model is None, returning.")
@@ -247,95 +364,81 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
     print("Starting training...")
     for epoch in tqdm(range(cfg['training']['epochs']), desc="TRAINING THE MODEL"):
-        
         model.train()
-        epoch_loss = 0
+        train_loss_sum = 0.0
+
         prog_bar = tqdm(data.train_loader, desc=f"Epoch {epoch+1}")
-        
         for images, targets in prog_bar:
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
             loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())
+            losses = sum(loss_dict.values())
             
             optimizer.zero_grad()
             losses.backward()
             optimizer.step()
             
-            train_loss += losses.item()
+            train_loss_sum += float(losses.item())
+            prog_bar.set_postfix(loss=float(losses.item()))
         
-        train_loss = train_loss / len(train_loader)
+        train_loss = train_loss_sum / max(1, len(train_loader))
 
-        # TODO: compute mAP
-        train_map = 0.0
-
-        # Test Loop
-        model.eval()
-        test_loss = 0
-        
+        # torchvision detectors return losses only in train() mode
+        model.train()
+        val_loss_sum = 0.0
         with torch.no_grad():
-            for images, targets in test_loader:
-                images = list(image.to(device) for image in images)
+            for images, targets in tqdm(val_loader, desc=f"Epoch {epoch+1} [val-loss]"):
+                images = [img.to(device) for img in images]
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
                 loss_dict = model(images, targets)
-                losses = sum(loss for loss in loss_dict.values())
-                
-                test_loss += losses.item()
-        
-        test_loss = test_loss / len(test_loader)
+                losses = sum(loss_dict.values())
+                val_loss_sum += float(losses.item())
+        val_loss = val_loss_sum / max(1, len(val_loader))
 
-        # TODO: compute mAP
-        test_map = 0.0
+        # ---- VAL COCO METRICS ----
+        eval_ = evaluate(exp, data, run)   # uses val_loader internally
+        val_map = eval_.metrics["coco/AP"]
 
-        
-        history['train_loss'].append(train_loss)
-        history['train_map'].append(train_map)
-        history['test_loss'].append(test_loss)
-        history['test_map'].append(test_map)
-        print(f"Epoch {epoch+1}/{cfg['training']['epochs']} | "
-              f"Train Loss: {train_loss:.4f} Train mAP: {train_map:.4f} | "
-              f"Test Loss: {test_loss:.4f} Test mAP: {test_map:.4f}")
-        
-        if scheduler:
-            scheduler.step()
-            
-        # Save Best Model based on Test mAP
-        if test_map > best_map:
-            best_map = test_map
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["val_map"].append(val_map)
+
+        print(
+            f"Epoch {epoch+1}/{cfg['training']['epochs']} | "
+            f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+            f"Val COCO AP: {val_map:.4f}"
+        )
+
+        if run.scheduler is not None:
+            run.scheduler.step()
+
+        if val_map > best_map:
+            best_map = val_map
             best_epoch = epoch
             torch.save(model.state_dict(), best_model_path)
-            print(f"  >>> New Best Model: {best_map:.4f} mAP at Epoch {epoch+1}")
-        
+            print(f"  >>> New Best Model: COCO AP {best_map:.4f} at Epoch {epoch+1}")
+
         wandb.log({
-            "epoch": epoch+1, 
-            "train_loss": train_loss, 
-            "train_map": train_map, 
-            "test_loss": test_loss, 
-            "test_map": test_map,
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_coco_ap": val_map,
             "best_map": best_map,
             "best_epoch": best_epoch,
         })
 
-    print(f"Training finished. Best model: {best_map:.4f} mAP at Epoch {best_epoch+1}")
-    torch.save(model.state_dict(), best_model_path)
+    print(f"Training finished. Best model: COCO AP {best_map:.4f} at Epoch {best_epoch+1}")
     run.best_map = best_map
     run.best_epoch = best_epoch
     run.history = history
-
     return run
-
-def evaluate(exp: Exp, data: Data, run: Run) -> Eval:
-    # TODO: implement evaluation of the best model on the test set with COCO metrics
-    pass
 
 def main(config_path: str) -> None:
     exp = setup_experiment(config_path)
     data = setup_data(exp)
     run = setup_model(exp, data)
     run = train(exp, data, run)
-    eval_ = evaluate(exp, data, run)
     wandb.finish()
 
 if __name__ == "__main__":
