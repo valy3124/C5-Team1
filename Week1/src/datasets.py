@@ -29,7 +29,12 @@ class KITTIMOTS:
     __getitem__ returns:
       (PIL.Image RGB, list[InstanceAnn])
     """
-    VALID_CLASS_IDS = {1, 2} # car=1, pedestrian=2
+    # COCO: 1=Person, 3=Car
+    # KITTI: 1=Car, 2=Pedestrian
+    KITTI_TO_COCO = {
+        1: 3,  # Car -> Car
+        2: 1   # Pedestrian -> Person
+    }
     IGNORE_ID = 10000
     BG_ID = 0
     VALIDATION_SEQS = {2, 6, 7, 8, 10, 13, 14, 16, 18}
@@ -135,7 +140,7 @@ class KITTIMOTS:
 
             class_id = obj_id // self.id_divisor
             instance_id = obj_id % self.id_divisor
-            if class_id not in self.VALID_CLASS_IDS:
+            if class_id not in self.KITTI_TO_COCO:
                 continue
 
             mask.fill(0)
@@ -178,7 +183,7 @@ class KITTIMOTS:
 
                 if obj_id == self.IGNORE_ID:
                     continue
-                if class_id not in self.VALID_CLASS_IDS:
+                if class_id not in self.KITTI_TO_COCO:
                     continue
 
                 rle = {"size": [h, w], "counts": counts}
