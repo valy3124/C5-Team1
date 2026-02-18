@@ -35,7 +35,7 @@ class KITTIMOTS:
 
     def __init__(
         self,
-        root: Union[str, Path],
+        root: Union[str, Path] = "~/mcv/datasets/C5/KITTI-MOTS/",
         split: Literal["training", "testing"] = "training",
         ann_source: Literal["png", "txt"] = "txt",
         id_divisor: int = 1000,
