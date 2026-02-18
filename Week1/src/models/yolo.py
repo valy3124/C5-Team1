@@ -18,12 +18,10 @@ class UltralyticsYOLO:
 
     Args:
     -----
-    weights : str
-        Path to model weights (can be the fine-tuned ones by us or the original) or model name
+    weights : Optional[str]
+        Path to model weights (can be the fine-tuned ones by us or the original)
     task : Literal["detect", "segment"]
-        Type of task (in this project we will use "detect")
-    imgsz : int
-        Inference image size
+        Type of task (in this project we use "detect")
     conf : float
         Confidence threshold
     iou : float
@@ -38,9 +36,8 @@ class UltralyticsYOLO:
 
     def __init__(
         self,
-        weights: str,
+        weights: Optional[str] = None,
         task: Literal["detect", "segment"] = "detect",
-        imgsz: int = 640,
         conf: float = 0.25,
         iou: float = 0.7,
         device: str = "0",
@@ -48,13 +45,16 @@ class UltralyticsYOLO:
         max_det: int = 300,
     ) -> None:
         self.task = task
-        self.imgsz = imgsz
         self.conf = conf
         self.iou = iou
         self.device = device
         self.half = half
         self.max_det = max_det
 
+        if weights is None:
+            # TODO: XAVI
+            raise ValueError("IMPLEMENT A DEFAULT FOR YOLO! (EASIER FOR INFERENCE IF WE DON'T HAVE IT DOWNLOADED)")
+        
         self.model: YOLO = YOLO(weights)
 
     def predict(self, image: Image.Image) -> Dict[str, Any]:
@@ -70,16 +70,15 @@ class UltralyticsYOLO:
         -----
         Dict[str, Any]
             {
-                "boxes_xyxy": np.ndarray (N,4),
+                "bboxes_xyxy": np.ndarray (N,4),
                 "scores": np.ndarray (N,),
-                "classes": np.ndarray (N,),
-                "masks": Optional[np.ndarray] (N,H,W) (always none in this project)
+                "category_ids": np.ndarray (N,),
             }
         """
 
         results = self.model.predict(
             source=image,
-            imgsz=self.imgsz,
+            imgsz=max(image.size),
             conf=self.conf,
             iou=self.iou,
             device=self.device,
@@ -93,10 +92,9 @@ class UltralyticsYOLO:
         # No detections case
         if result.boxes is None or len(result.boxes) == 0:
             return {
-                "boxes_xyxy": np.empty((0, 4), dtype=np.float32),
+                "bboxes_xyxy": np.empty((0, 4), dtype=np.float32),
                 "scores": np.empty((0,), dtype=np.float32),
-                "classes": np.empty((0,), dtype=np.int64),
-                "masks": None,
+                "category_ids": np.empty((0,), dtype=np.int64),
             }
 
         boxes_xyxy = (
@@ -109,11 +107,8 @@ class UltralyticsYOLO:
             result.boxes.cls.detach().cpu().numpy().astype(np.int64)
         )
 
-        masks: Optional[np.ndarray] = None
-
         return {
-            "boxes_xyxy": boxes_xyxy,
+            "bboxes_xyxy": boxes_xyxy,
             "scores": scores,
-            "classes": classes,
-            "masks": masks,
+            "category_ids": classes
         }
