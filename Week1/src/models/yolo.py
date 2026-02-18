@@ -30,8 +30,6 @@ class UltralyticsYOLO:
         Device string ("0" for gpu)
     half : bool
         Whether to use FP16 inference
-    max_det : int
-        Maximum number of detections per image
     """
 
     def __init__(
@@ -42,14 +40,12 @@ class UltralyticsYOLO:
         iou: float = 0.7,
         device: str = "0",
         half: bool = False,
-        max_det: int = 300,
     ) -> None:
         self.task = task
         self.conf = conf
         self.iou = iou
         self.device = device
         self.half = half
-        self.max_det = max_det
 
         if weights is None:
             # TODO: XAVI
@@ -83,7 +79,6 @@ class UltralyticsYOLO:
             iou=self.iou,
             device=self.device,
             half=self.half,
-            max_det=self.max_det,
             verbose=False,
         )
 
