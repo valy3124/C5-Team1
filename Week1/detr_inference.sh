@@ -1,0 +1,1 @@
+python -m src.inference.run_inference --model detr --root /disk1/users/dhernandez/datasets/KITTI-MOTS --output detr_results.jsonl

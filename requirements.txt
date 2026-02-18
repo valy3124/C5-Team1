@@ -11,6 +11,7 @@ nvitop
 # Session 1
 transformers
 huggingface_hub
+timm
 ultralytics
 pycocotools
 albumentations
