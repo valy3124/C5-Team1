@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 from PIL import Image
 
-from src.data.kitti_mots import KITTIMOTS
+from src.datasets import KITTIMOTS
 from src.models.yolo import UltralyticsYOLO
 
 

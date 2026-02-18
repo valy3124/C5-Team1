@@ -203,7 +203,7 @@ if __name__ == "__main__":
     # The main dataset root (in this case, in the UAB cluster)
     ROOT = "~/mcv/datasets/C5/KITTI-MOTS/"
 
-    # Instantiate the class, will be fed with the png masks and will computre bboxes
+    # Instantiate the class, will be fed with the png masks and will compute bboxes
     ds = KITTIMOTS(
         root=ROOT,
         split="training",
