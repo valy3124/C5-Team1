@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Union, Literal, Any
+from typing import Dict, List, Tuple, Union, Literal, Any, Optional
 
 import numpy as np
 import PIL.Image as Image
@@ -31,7 +31,7 @@ class KITTIMOTS:
     """
     # COCO: 1=Person, 3=Car
     # KITTI: 1=Car, 2=Pedestrian
-    KITTI_TO_COCO = {
+    LABELS_MAPPING = {
         1: 3,  # Car -> Car
         2: 1   # Pedestrian -> Person
     }
@@ -140,7 +140,7 @@ class KITTIMOTS:
 
             class_id = obj_id // self.id_divisor
             instance_id = obj_id % self.id_divisor
-            if class_id not in self.KITTI_TO_COCO:
+            if class_id not in self.LABELS_MAPPING:
                 continue
 
             mask.fill(0)
@@ -183,7 +183,7 @@ class KITTIMOTS:
 
                 if obj_id == self.IGNORE_ID:
                     continue
-                if class_id not in self.KITTI_TO_COCO:
+                if class_id not in self.LABELS_MAPPING:
                     continue
 
                 rle = {"size": [h, w], "counts": counts}

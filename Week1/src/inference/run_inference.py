@@ -43,21 +43,36 @@ def _to_jsonable_pred(image_id: int, pred: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "image_id": image_id,
-        "boxes_xyxy": boxes.tolist(),
+        "bboxes_xyxy": boxes.tolist(),
         "scores": scores.tolist(),
         "category_ids": category_ids.tolist()
     }
 
-def post_process(pred: Dict[str, Any], max_det: int) -> Dict[str, Any]:
+def post_process(pred: Dict[str, Any], dataset: Any, max_det: int) -> Dict[str, Any]:
     """
-    Post-process raw model predictions by keeping only KITTI-MOTS classes and top `max_det` detections per image.
+    Post-process raw model predictions by keeping only valid dataset classes and top `max_det` detections per image.
     """
-    # TODO
-    if len(result["scores"]) > self.max_det:
-        top_k_indices = torch.topk(results["scores"], k=self.max_det).indices
-        result["scores"] = result["scores"][top_k_indices]
-        result["labels"] = result["labels"][top_k_indices]
-        result["boxes"] = result["boxes"][top_k_indices]
+    # Valid COCO classes from the dataset
+    valid_classes = list(dataset.LABELS_MAPPING.values())
+
+    # Keep only predictions for valid classes
+    keep_mask = np.isin(pred["category_ids"], valid_classes)
+    boxes = pred["bboxes_xyxy"][keep_mask]
+    scores = pred["scores"][keep_mask]
+    labels = pred["category_ids"][keep_mask]
+
+    # Get top highest scores if we have more than max_det
+    if len(scores) > max_det:
+        top_k_indices = np.argsort(-scores)[:max_det]
+        boxes = boxes[top_k_indices]
+        scores = scores[top_k_indices]
+        labels = labels[top_k_indices]
+
+    return {
+        "bboxes_xyxy": boxes,
+        "scores": scores,
+        "category_ids": labels
+    }
 
 def build_model(args: argparse.Namespace) -> Any:
     name = args.model.lower()
@@ -126,7 +141,7 @@ def run_inference(
         for i in range(n):
             img, _, _ = ds[i]
             pred = model.predict(img)
-            pred = post_process(pred, max_det)
+            pred = post_process(pred, ds, max_det)
             f.write(json.dumps(_to_jsonable_pred(i, pred)) + "\n")
 
             if (i + 1) % 100 == 0:
@@ -139,7 +154,7 @@ def parse_args():
 
     # Inference arguments
     parser.add_argument("--root", type=str, default="~/mcv/datasets/C5/KITTI-MOTS/", help="Path to KITTI-MOTS dataset")
-    parser.add_argument("--split", type=str, default="dev", help="dev or validation")
+    parser.add_argument("--split", type=str, default="validation", help="dev or validation")
     parser.add_argument("--ann_source", type=str, default="txt", help="Annotation source (txt/png)")
     parser.add_argument("--output", type=str, required=True, help="Output JSONL path")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of frames for debugging")
@@ -164,5 +179,6 @@ if __name__ == "__main__":
         ann_source=args.ann_source,
         output=args.output,
         model=model,
+        max_det=args.max_det,
         limit=args.limit,
     )
