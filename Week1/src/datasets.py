@@ -18,8 +18,8 @@ class InstanceAnn:
     object_id: int
     class_id: int
     instance_id: int
-    mask_rle: Dict[str, Any]                 # {"size":[H,W], "counts": bytes}
-    bbox_xyxy: Tuple[int, int, int, int]     # (x1, y1, x2, y2)
+    mask_rle: Dict[str, Any]            
+    bbox_xyxy: Tuple[int, int, int, int] # (x1, y1, x2, y2)
 
 
 class KITTIMOTS:
@@ -32,31 +32,32 @@ class KITTIMOTS:
     VALID_CLASS_IDS = {1, 2} # car=1, pedestrian=2
     IGNORE_ID = 10000
     BG_ID = 0
+    VALIDATION_SEQS = {2, 6, 7, 8, 10, 13, 14, 16, 18}
 
     def __init__(
         self,
         root: Union[str, Path] = "~/mcv/datasets/C5/KITTI-MOTS/",
-        split: Literal["training", "testing"] = "training",
+        split: Literal["dev", "validation"] = "dev",
         ann_source: Literal["png", "txt"] = "txt",
         id_divisor: int = 1000,
         compute_boxes: bool = True,
     ):
+        
         self.root = Path(root).expanduser()
         self.split = split
+
         self.ann_source = ann_source
         self.id_divisor = int(id_divisor)
         self.compute_boxes = bool(compute_boxes)
 
-        self.img_root = self.root / split / "image_02"
+        self.img_root = self.root / "training" / "image_02"
         self.png_ann_root = self.root / "instances"
         self.txt_ann_root = self.root / "instances_txt"
 
-        # testing usually has no GT
-        if split == "training":
-            if ann_source == "png" and not self.png_ann_root.exists():
-                raise FileNotFoundError(f"PNG annotations folder not found: {self.png_ann_root}")
-            if ann_source == "txt" and not self.txt_ann_root.exists():
-                raise FileNotFoundError(f"TXT annotations folder not found: {self.txt_ann_root}")
+        if ann_source == "png" and not self.png_ann_root.exists():
+            raise FileNotFoundError(f"PNG annotations folder not found: {self.png_ann_root}")
+        if ann_source == "txt" and not self.txt_ann_root.exists():
+            raise FileNotFoundError(f"TXT annotations folder not found: {self.txt_ann_root}")
 
         # Build (seq, frame, img_path)
         self.index: List[Tuple[str, int, Path]] = self._build_index()
@@ -70,10 +71,6 @@ class KITTIMOTS:
     def __getitem__(self, i: int) -> Tuple[Image.Image, List[InstanceAnn]]:
         seq, frame, img_path = self.index[i]
         image = Image.open(img_path).convert("RGB")
-
-        # No annotations in testing split
-        if self.split == "testing":
-            return image, []
 
         if self.ann_source == "png":
             anns = self._anns_from_png(seq, frame)
@@ -89,17 +86,35 @@ class KITTIMOTS:
 
         return image, anns, meta
 
-    # Indexing based on training/image02/*
+
     def _build_index(self) -> List[Tuple[str, int, Path]]:
-        index: List[Tuple[str, int, Path]] = []
-        for seq_dir in sorted([p for p in self.img_root.iterdir() if p.is_dir()]):
-            seq = seq_dir.name
-            for img_path in sorted(seq_dir.glob("*.png")):
-                frame = int(img_path.stem)   # "000052" -> 52
+        index = []
+        seq_dirs = sorted([p for p in self.img_root.iterdir() if p.is_dir()])
+
+        for seq_dir in seq_dirs:
+            seq = seq_dir.name              
+            seq_int = int(seq)           
+
+            is_val_seq = (seq_int in self.VALIDATION_SEQS)
+
+            if self.split == "dev":
+                if is_val_seq:
+                    continue
+            
+            elif self.split == "validation":
+                if not is_val_seq:
+                    continue
+
+            else:
+                raise ValueError(f"Unknown split: {self.split}")
+
+            img_paths = sorted(seq_dir.glob("*.png"))   
+            for img_path in img_paths:
+                frame = int(img_path.stem)
                 index.append((seq, frame, img_path))
-        if not index:
-            raise FileNotFoundError(f"No images found under: {self.img_root}")
+
         return index
+
 
     # PNG annotations: instances/<seq>/<frame>.png
     def _anns_from_png(self, seq: str, frame: int) -> List[InstanceAnn]:
@@ -215,7 +230,7 @@ if __name__ == "__main__":
     # Instantiate the class, will be fed with the png masks and will compute bboxes
     ds = KITTIMOTS(
         root=ROOT,
-        split="training",
+        split="dev",
         ann_source="png",
         compute_boxes=True,
     )
@@ -239,13 +254,14 @@ if __name__ == "__main__":
             f"  inst[{k}] object_id={a.object_id} class_id={a.class_id} instance_id={a.instance_id} bbox={a.bbox_xyxy}"
         )
 
+    vis = img.copy()
+    draw = ImageDraw.Draw(vis)
+
+    overlay = np.array(vis).copy()
+    vis_overlay = vis
+
     # Draw bboxes and overlay the masks
     if len(anns) > 0:
-        vis = img.copy()
-        draw = ImageDraw.Draw(vis)
-        overlay = np.array(vis).copy()
-        vis_overlay = vis
-
         for a in anns:
             draw.rectangle(a.bbox_xyxy, outline=(0, 255, 0), width=2)
 

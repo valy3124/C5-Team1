@@ -139,7 +139,7 @@ def parse_args():
 
     # Inference arguments
     parser.add_argument("--root", type=str, default="~/mcv/datasets/C5/KITTI-MOTS/", help="Path to KITTI-MOTS dataset")
-    parser.add_argument("--split", type=str, default="training", help="training or testing")
+    parser.add_argument("--split", type=str, default="dev", help="dev or validation")
     parser.add_argument("--ann_source", type=str, default="txt", help="Annotation source (txt/png)")
     parser.add_argument("--output", type=str, required=True, help="Output JSONL path")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of frames for debugging")
