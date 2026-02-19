@@ -29,12 +29,12 @@ class KITTIMOTS:
     __getitem__ returns:
       (PIL.Image RGB, list[InstanceAnn])
     """
-    # COCO:  1=Person, 3=Car
+    # COCO: 0=Person, 2=Car
     # KITTI: 1=Car, 2=Pedestrian
     LABELS_MAPPING = {
-        1: 3,  # KITTI Car → COCO Car
-        2: 1   # KITTI Pedestrian → COCO Person
-    }
+    1: 2,  # KITTI Car → COCO Car
+    2: 0   # KITTI Pedestrian → COCO Person
+}
     IGNORE_ID = 10000
     BG_ID = 0
     VALIDATION_SEQS = {2, 6, 7, 8, 10, 13, 14, 16, 18}

@@ -49,52 +49,64 @@ class UltralyticsYOLO:
         
         self.model: YOLO = YOLO(weights)
 
-    def predict(self, image: Image.Image) -> Dict[str, Any]:
+    def predict(self, images: List[Image.Image]) -> List[Dict[str, Any]]:
         """
         Run inference on a single image
 
         Args
         -----
-        image : PIL.Image.Image
-            Input RGB image
+        images : Union[PIL.Image.Image, List[PIL.Image.Image]]
+            Input RGB image or list of RGB images.
 
         Returns
         -----
-        Dict[str, Any]
+        List[Dict[str, Any]]
+            One dictionary per image, each with:
             {
-                "bboxes_xyxy": np.ndarray (N,4),
-                "scores": np.ndarray (N,),
-                "category_ids": np.ndarray (N,),
+                "bboxes_xyxy": np.ndarray (Ni, 4),
+                "scores": np.ndarray (Ni,),
+                "category_ids": np.ndarray (Ni,),
             }
         """
 
-        result = self.model.predict(
-            source=image,
-            imgsz=max(image.size),
+        single_input = False
+        if isinstance(images, Image.Image):
+            images = [images]
+            single_input = True
+
+        results = self.model.predict(
+            source=images,
+            imgsz=max(max(img.size) for img in images),
             conf=self.conf,
             iou=self.iou,
             device=self.device,
             half=self.half,
             verbose=False,
-        )[0]
+        )
+
+        outputs = []   
 
         # No detections case
-        if result.boxes is None or len(result.boxes) == 0:
-            return {
-                "bboxes_xyxy": np.empty((0, 4), dtype=np.float32),
-                "scores": np.empty((0,), dtype=np.float32),
-                "category_ids": np.empty((0,), dtype=np.int64),
-            }
+        for result in results:
+            if result.boxes is None or len(result.boxes) == 0:
+                outputs.append({
+                    "bboxes_xyxy": np.empty((0, 4), dtype=np.float32),
+                    "scores": np.empty((0,), dtype=np.float32),
+                    "category_ids": np.empty((0,), dtype=np.int64),
+                })
+                continue
         
-        bboxes = result.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
-        scores = result.boxes.conf.detach().cpu().numpy().astype(np.float32)
-        classes = result.boxes.cls.detach().cpu().numpy().astype(np.int64)
+            bboxes = result.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
+            scores = result.boxes.conf.detach().cpu().numpy().astype(np.float32)
+            classes = result.boxes.cls.detach().cpu().numpy().astype(np.int64)
 
-        # YOLO to standard COCO-90 Mapping (0=Person, 2=Car => 1=Person, 3=Car). Other classes are mapped to 0 (N/A)
-        classes = np.where((classes == 0) | (classes == 2), classes + 1, 0)
+            # YOLO to standard COCO-90 Mapping (0=Person, 2=Car => 1=Person, 3=Car). Other classes are mapped to 0 (N/A)
+            classes = np.where((classes == 0) | (classes == 2), classes + 1, 0)
 
-        return {
-            "bboxes_xyxy": bboxes,
-            "scores": scores,
-            "category_ids": classes,
-        }
+            outputs.append({
+                "bboxes_xyxy": bboxes,
+                "scores": scores,
+                "category_ids": classes,
+            })
+
+        return outputs[0] if single_input else outputs

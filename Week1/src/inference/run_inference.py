@@ -19,13 +19,18 @@ import argparse
 import json
 import torch
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import numpy as np
 from PIL import Image
+import time
+import wandb
 
 from src.datasets import KITTIMOTS
 from src.models.yolo import UltralyticsYOLO
 from src.models.detr import HuggingFaceDETR 
+
+from src.inference.evaluation import CocoMetrics
+
 
 def _to_jsonable_pred(image_id: int, pred: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -136,15 +141,35 @@ def run_inference(
     n = len(ds) if limit is None else min(limit, len(ds))
 
     print(f"Starting inference on {n} frames using model {type(model).__name__}...")
+
+    total_inference_time = 0.0
     with out_path.open("w", encoding="utf-8") as f:
         for i in range(n):
             img, _, _ = ds[i]
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            start_time = time.time()
             pred = model.predict(img)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            end_time = time.time()
+            total_inference_time += (end_time - start_time)
+
             pred = post_process(pred, ds, max_det)
             f.write(json.dumps(_to_jsonable_pred(i, pred)) + "\n")
 
             if (i + 1) % 100 == 0:
                 print(f"Processed {i+1}/{n} frames")
+    
+    avg_time = total_inference_time / n
+    fps = 1.0 / avg_time
+
+    wandb.log({
+        "inference/avg_latency_ms": avg_time * 1000,
+        "inference/fps": fps,
+        "inference/total_time_s": total_inference_time
+    })
 
     print(f"Saved predictions to {out_path}")
 
@@ -153,12 +178,12 @@ def parse_args():
 
     # Inference arguments
     parser.add_argument("--root", type=str, default="~/mcv/datasets/C5/KITTI-MOTS/", help="Path to KITTI-MOTS dataset")
+    parser.add_argument("--exp_name", type=str, default="default_experiment", help="Experiment name")
     parser.add_argument("--split", type=str, default="validation", help="dev or validation")
     parser.add_argument("--ann_source", type=str, default="txt", help="Annotation source (txt/png)")
     parser.add_argument("--output", type=str, required=True, help="Output JSONL path")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of frames for debugging")
     parser.add_argument("--max_det", type=int, default=100, help="Limit number of (valid) detections per image (COCO metrics only use top 100)")
-
     # Model arguments
     parser.add_argument("--model", type=str, required=True, help="Model type: faster_rcnn, detr, yolo")
     parser.add_argument("--weights", type=str, default=None, help="Path to weights (default: pre-trained weights of COCO)")
@@ -172,6 +197,29 @@ if __name__ == "__main__":
     args = parse_args()
     model = build_model(args)
 
+    # Extract underlying torch model
+    if hasattr(model, "model"):
+        torch_model = model.model
+    else:
+        torch_model = model
+
+    num_params = sum(p.numel() for p in torch_model.parameters())
+    num_trainable = sum(p.numel() for p in torch_model.parameters() if p.requires_grad)
+
+    wandb.init(
+        entity="c5-team1",
+        project="C5-experiments",
+        name=args.exp_name
+    )
+
+    wandb.config.update({
+    "model_name": args.model,
+    "weights": args.weights,
+    "num_parameters": num_params,
+    "num_trainable_parameters": num_trainable,
+    })
+
+    # Inference
     run_inference(
         root=args.root,
         split=args.split,
@@ -181,3 +229,16 @@ if __name__ == "__main__":
         max_det=args.max_det,
         limit=args.limit,
     )
+    # JSONL as artifact to track it in wandb
+    artifact = wandb.Artifact(
+        name=f"{args.exp_name}_predictions",
+        type="inference-results"
+    )
+    artifact.add_file(args.output)
+    wandb.log_artifact(artifact)
+    
+    # Evaluation using COCO metrics
+    metrics = CocoMetrics(root=args.root, split=args.split, ann_source=args.ann_source)
+    metrics.evaluate(pred_path=args.output)
+
+    wandb.finish()

@@ -53,7 +53,7 @@ class HuggingFaceDETR:
             
         self.model.eval()
 
-    def predict(self, image: Image.Image) -> Dict[str, Any]:
+    def predict(self, image: Union[Image.Image, List[Image.Image]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Run inference on a single image
 
@@ -71,6 +71,12 @@ class HuggingFaceDETR:
                 "category_ids": np.ndarray (N,),
             }
         """
+
+        single_input = False
+        if isinstance(image, Image.Image):
+            image = [image]
+            single_input = True
+
         # 1. Preprocessing
         inputs = self.processor(images=image, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -84,14 +90,22 @@ class HuggingFaceDETR:
             outputs = self.model(**inputs)
 
         # 3. Post-processing (Image.size is WxH, but DETR expeects HxW)
-        result = self.processor.post_process_object_detection(
-            outputs, 
-            target_sizes=torch.tensor([image.size[::-1]]).to(self.device), 
-            threshold=self.conf
-        )[0]
+        target_sizes = torch.tensor(
+            [img.size[::-1] for img in image]
+        ).to(self.device)
 
-        return {
-            "bboxes_xyxy": result["boxes"].cpu().numpy().astype(np.float32),
-            "scores": result["scores"].cpu().numpy().astype(np.float32),
-            "category_ids": result["labels"].cpu().numpy().astype(np.int64),
-        }
+        results = self.processor.post_process_object_detection(
+            outputs,
+            target_sizes=target_sizes,
+            threshold=self.conf
+        )
+
+        outputs_list = []
+        for result in results:
+            outputs_list.append({
+                "bboxes_xyxy": result["boxes"].cpu().numpy().astype(np.float32),
+                "scores": result["scores"].cpu().numpy().astype(np.float32),
+                "category_ids": result["labels"].cpu().numpy().astype(np.int64),
+            })
+
+        return outputs_list[0] if single_input else outputs_list
