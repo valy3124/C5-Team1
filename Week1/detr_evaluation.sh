@@ -1,0 +1,1 @@
+python -m src.inference.run_evaluation --root /disk1/users/dhernandez/datasets/KITTI-MOTS --preds detr_baseline_results.jsonl

@@ -1,3 +1,4 @@
 __pycache__
 Week1/yolov8s.pt
-/wandb
+# Weights & Biases local files
+wandb/
