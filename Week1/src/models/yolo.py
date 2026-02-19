@@ -68,7 +68,7 @@ class UltralyticsYOLO:
             }
         """
 
-        results = self.model.predict(
+        result = self.model.predict(
             source=image,
             imgsz=max(image.size),
             conf=self.conf,
@@ -76,9 +76,7 @@ class UltralyticsYOLO:
             device=self.device,
             half=self.half,
             verbose=False,
-        )
-
-        result = results[0]
+        )[0]
 
         # No detections case
         if result.boxes is None or len(result.boxes) == 0:
@@ -87,19 +85,16 @@ class UltralyticsYOLO:
                 "scores": np.empty((0,), dtype=np.float32),
                 "category_ids": np.empty((0,), dtype=np.int64),
             }
+        
+        bboxes = result.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
+        scores = result.boxes.conf.detach().cpu().numpy().astype(np.float32)
+        classes = result.boxes.cls.detach().cpu().numpy().astype(np.int64)
 
-        boxes_xyxy = (
-            result.boxes.xyxy.detach().cpu().numpy().astype(np.float32)
-        )
-        scores = (
-            result.boxes.conf.detach().cpu().numpy().astype(np.float32)
-        )
-        classes = (
-            result.boxes.cls.detach().cpu().numpy().astype(np.int64)
-        )
+        # YOLO to standard COCO-90 Mapping (0=Person, 2=Car => 1=Person, 3=Car). Other classes are mapped to 0 (N/A)
+        classes = np.where((classes == 0) | (classes == 2), classes + 1, 0)
 
         return {
-            "bboxes_xyxy": result.boxes.xyxy.detach().cpu().numpy().astype(np.float32),
-            "scores": result.boxes.conf.detach().cpu().numpy().astype(np.float32),
-            "category_ids": result.boxes.cls.detach().cpu().numpy().astype(np.int64),
+            "bboxes_xyxy": bboxes,
+            "scores": scores,
+            "category_ids": classes,
         }

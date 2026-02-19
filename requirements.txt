@@ -7,6 +7,7 @@ tqdm
 wandb
 torchviz
 nvitop
+ipykernel
 
 # Session 1
 transformers
