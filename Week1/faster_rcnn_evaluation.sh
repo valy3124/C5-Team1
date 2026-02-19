@@ -1,0 +1,1 @@
+python -m src.inference.run_evaluation  --preds faster_rcnn_results.jsonl

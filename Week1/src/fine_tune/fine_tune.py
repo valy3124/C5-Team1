@@ -14,6 +14,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms.v2 as transforms
+from torchvision.transforms.functional import to_tensor
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
@@ -27,10 +28,113 @@ from pycocotools.cocoeval import COCOeval
 
 # --- 3. Project Imports ---
 import datasets
-from models.faster_rcnn import (get_transforms, 
-                                ApplyAlbumentations, 
-                                KITTIMOTSToTorchvision,FasterRCNNModel)
+from models.faster_rcnn import FasterRCNNModel
 
+
+# TODO: Benet, si podem juntar el dos adapters de sota per a fer-ho més modulable amb
+# tot el codi seria perf. Potser posar a algun altre lloc
+# KITTI-MOTS -> Torchvision adapter
+class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
+    """
+    Returns:
+      image: FloatTensor[C,H,W] in [0,1]
+      target: dict(boxes, labels, image_id, area, iscrowd)
+    """
+    def __init__(self, base_ds):
+        self.base_ds = base_ds
+
+    def __len__(self):
+        return len(self.base_ds)
+
+    def raw_anns_to_target(self, raw_anns: List[Any], image_id: int) -> Dict[str, torch.Tensor]:
+        boxes, labels = [], []
+
+        for ann in raw_anns:
+            cls = int(getattr(ann, "class_id", -1))
+            box = getattr(ann, "bbox_xyxy", None)
+            if box is None:
+                continue
+
+            boxes.append([float(box[0]), float(box[1]), float(box[2]), float(box[3])])
+            labels.append(int(cls))
+
+        if len(boxes) == 0:
+            boxes_t = torch.zeros((0, 4), dtype=torch.float32)
+            labels_t = torch.zeros((0,), dtype=torch.int64)
+        else:
+            boxes_t = torch.tensor(boxes, dtype=torch.float32)
+            labels_t = torch.tensor(labels, dtype=torch.int64)
+
+        area = (
+            (boxes_t[:, 2] - boxes_t[:, 0]).clamp(min=0) *
+            (boxes_t[:, 3] - boxes_t[:, 1]).clamp(min=0)
+        ) if boxes_t.numel() else torch.zeros((0,), dtype=torch.float32)
+
+        return {
+            "boxes": boxes_t,
+            "labels": labels_t,
+            "image_id": torch.tensor([image_id], dtype=torch.int64),
+            "area": area.to(torch.float32),
+            "iscrowd": torch.zeros((labels_t.shape[0],), dtype=torch.int64)}
+
+    def __getitem__(self, idx: int):
+        img_pil, raw_anns, _ = self.base_ds[idx]
+        img_np = np.array(img_pil)
+        target = self.raw_anns_to_target(raw_anns, image_id=idx)
+        return img_np, target
+
+
+# Apply Transforms to each image
+class ApplyAlbumentations(torch.utils.data.Dataset):
+    def __init__(self, ds, tf, keep_empty: bool = True):
+        self.ds = ds # already adapted
+        self.tf = tf
+        self.keep_empty = keep_empty
+        
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        img_np, target = self.ds[idx]
+
+        boxes = target["boxes"].numpy().tolist()
+        labels = target["labels"].numpy().tolist()
+
+        if self.tf is not None:
+            out = self.tf(image=img_np, bboxes=boxes, class_labels=labels)
+            img = out["image"]
+            boxes_tf = out["bboxes"]
+            labels_tf = out["class_labels"]
+
+            if isinstance(img, torch.Tensor):
+                if img.dtype == torch.uint8:
+                    img = img.float().div(255.0)
+                else:
+                    img = img.float()
+            else:
+                # safety fallback if transform didn't convert to tensor
+                img = to_tensor(img)  # -> float [0,1]
+        else:
+            img = to_tensor(img_np)
+            boxes_tf, labels_tf = boxes, labels
+
+        # after albumentations the boxes could be removed...avoid them
+        if len(boxes_tf) == 0 and not self.keep_empty:
+            return self.__getitem__((idx + 1) % len(self))
+
+        if len(boxes_tf) == 0:
+            target["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
+            target["labels"] = torch.zeros((0,), dtype=torch.int64)
+        else:
+            target["boxes"] = torch.tensor(boxes_tf, dtype=torch.float32)
+            target["labels"] = torch.tensor(labels_tf, dtype=torch.int64)
+
+        target["area"] = (
+            (target["boxes"][:, 2] - target["boxes"][:, 0]).clamp(min=0) *
+            (target["boxes"][:, 3] - target["boxes"][:, 1]).clamp(min=0)
+        ) if target["boxes"].numel() else torch.zeros((0,), dtype=torch.float32)
+
+        return img, target
 
 
 @dataclass
@@ -212,6 +316,39 @@ def setup_model(exp: Exp, data: Data) -> Run:
     history = {'train_loss': [], 'train_map': [], 'val_loss': [], 'val_map': []}
     
     return Run(model, optimizer, history, scheduler, best_map=0.0, best_epoch=0)
+
+# Albumentations transforms for Faster-RCNN
+def get_transforms(is_train=True):
+    if is_train:
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.02, scale_limit=0.10, rotate_limit=5,
+                border_mode=0, p=0.5
+            ),
+            A.RandomBrightnessContrast(p=0.3),
+            A.HueSaturationValue(p=0.2),
+            A.MotionBlur(p=0.1),
+            ToTensorV2()
+        ],
+        bbox_params=A.BboxParams(
+            format='pascal_voc',
+            label_fields=['class_labels'], 
+            clip=True, 
+            min_area=1,
+            min_visibility=0.1
+            )
+        )
+    else:
+        return A.Compose([
+            ToTensorV2()
+        ], 
+        bbox_params=A.BboxParams(
+            format='pascal_voc', 
+            label_fields=['class_labels'],
+            clip=True
+            )
+        )
 
 
 def _to_xywh(box_xyxy):
