@@ -1,1 +1,1 @@
-python -m src.inference.run_inference --model detr --exp_name detr_inference --output src/results/detr_results/detr_inference.jsonl
+python -m src.inference.run_inference --model detr --exp_name detr_baseline --output src/results/detr_results/detr_baseline_results.jsonl

@@ -145,12 +145,3 @@ class CocoMetrics:
                 f"{cat_name}/AR_medium": coco_eval.stats[10],
                 f"{cat_name}/AR_large": coco_eval.stats[11],
             })
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run evaluation on KITTI-MOTS dataset")
-
-    # Inference arguments
-    parser.add_argument("--root", type=str, default="~/mcv/datasets/C5/KITTI-MOTS/", help="Path to KITTI-MOTS dataset")
-    parser.add_argument("--preds", required=True, help="Path to predictions.jsonl")
-    
-    return parser.parse_args()
