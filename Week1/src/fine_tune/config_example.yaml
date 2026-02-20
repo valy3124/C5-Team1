@@ -1,24 +1,28 @@
-project: "kitti-mots-finetune"
+project: "Fine-tune Faster R-CNN KITTI-MOTS"
 experiment_name: "faster_rcnn_baseline"
 output_dir: "results"
 
 data:
   root: "~/mcv/datasets/C5/KITTI-MOTS/"
   num_workers: 4
+  mode: "search"       # Options: search (train on "train", validate on "dev"), full (train on "train_full", validate on "validation")
+  split_ratio: 0.8     # For search mode
+  seed: 42             # For deterministic splitting
 
 model:
   name: "faster_rcnn" # Options: faster_rcnn, yolo, detr
   weights: "fasterrcnn_mobilenet_v3_large_fpn" # or yolov8n.pt for YOLO
 
 training:
-  epochs: 10
-  batch_size: 4
-  lr: 0.005
+  epochs: 100
+  batch_size: 32
+  val_batch_size: 32
+  lr: 0.00005 # 0.0001
   train_backbone: false
+  augment: true
   scheduler: 
-    name: step
-    step_size: 3
-    gamma: 0.1
+    name: cosine
+    t_max: 100
 
 
 debug: false

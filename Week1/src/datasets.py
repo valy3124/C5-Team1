@@ -29,12 +29,12 @@ class KITTIMOTS:
     __getitem__ returns:
       (PIL.Image RGB, list[InstanceAnn])
     """
-    # COCO: 0=Person, 2=Car
+    # COCO:  1=Person, 3=Car
     # KITTI: 1=Car, 2=Pedestrian
     LABELS_MAPPING = {
-    1: 2,  # KITTI Car → COCO Car
-    2: 0   # KITTI Pedestrian → COCO Person
-}
+        1: 3,  # KITTI Car → COCO Car
+        2: 1   # KITTI Pedestrian → COCO Person
+    }
     IGNORE_ID = 10000
     BG_ID = 0
     VALIDATION_SEQS = {2, 6, 7, 8, 10, 13, 14, 16, 18}
@@ -42,14 +42,18 @@ class KITTIMOTS:
     def __init__(
         self,
         root: Union[str, Path] = "~/mcv/datasets/C5/KITTI-MOTS/",
-        split: Literal["train", "validation"] = "train",
+        split: Literal["train", "dev", "validation", "train_full"] = "train",
         ann_source: Literal["png", "txt"] = "txt",
         id_divisor: int = 1000,
         compute_boxes: bool = True,
+        seed: int = 42,
+        split_ratio: float = 0.8,
     ):
         
         self.root = Path(root).expanduser()
         self.split = split
+        self.seed = seed
+        self.split_ratio = split_ratio
 
         self.ann_source = ann_source
         self.id_divisor = int(id_divisor)
@@ -96,27 +100,48 @@ class KITTIMOTS:
         index = []
         seq_dirs = sorted([p for p in self.img_root.iterdir() if p.is_dir()])
 
+        all_seqs = []
+        for seq_dir in seq_dirs:
+            seq = seq_dir.name              
+            seq_int = int(seq)
+            all_seqs.append(seq_int)
+        
+        # Identify official training and validation sequences
+        train_seqs_official = [s for s in all_seqs if s not in self.VALIDATION_SEQS]
+        val_seqs_official = sorted(list(self.VALIDATION_SEQS)) # Official validation
+
+        # Deterministic shuffle for splitting official train into train/dev
+        import random
+        rng = random.Random(self.seed)
+        shuffled_train = sorted(train_seqs_official) # Sort first to ensure deterministic start
+        rng.shuffle(shuffled_train)
+        
+        n_train = int(len(shuffled_train) * self.split_ratio)
+        sub_train_seqs = set(shuffled_train[:n_train])
+        sub_dev_seqs = set(shuffled_train[n_train:])
+        
+        target_seqs = set()
+        
+        if self.split == "train":
+            target_seqs = sub_train_seqs
+        elif self.split == "dev":
+            target_seqs = sub_dev_seqs
+        elif self.split == "validation":
+            target_seqs = set(val_seqs_official)
+        elif self.split == "train_full":
+            target_seqs = set(train_seqs_official)
+        else:
+            raise ValueError(f"Unknown split: {self.split}")
+
         for seq_dir in seq_dirs:
             seq = seq_dir.name              
             seq_int = int(seq)           
 
-            is_val_seq = (seq_int in self.VALIDATION_SEQS)
-
-            if self.split == "train":
-                if is_val_seq:
-                    continue
-            
-            elif self.split == "validation":
-                if not is_val_seq:
-                    continue
-
-            else:
-                raise ValueError(f"Unknown split: {self.split}")
-
-            img_paths = sorted(seq_dir.glob("*.png"))   
-            for img_path in img_paths:
-                frame = int(img_path.stem)
-                index.append((seq, frame, img_path))
+            if seq_int in target_seqs:
+                img_paths = sorted(seq_dir.glob("*.png"))   
+                for img_path in img_paths:
+                    frame = int(img_path.stem)
+                    index.append((seq, frame, img_path))
 
         return index
 

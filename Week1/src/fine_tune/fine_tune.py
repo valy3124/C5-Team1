@@ -1,12 +1,16 @@
 import argparse
 import os
 import sys
+import json
 
 # --- 1. Setup the Path ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-if project_root not in sys.path:
-    sys.path.append(project_root)
+src_dir = os.path.dirname(current_dir)
+week1_dir = os.path.dirname(src_dir)
+if src_dir not in sys.path:
+    sys.path.append(src_dir)
+if week1_dir not in sys.path:
+    sys.path.append(week1_dir)
 
 # --- 2. Standard Imports ---
 import yaml
@@ -14,9 +18,9 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms.v2 as transforms
-from torchvision.transforms.functional import to_tensor
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from torchvision.transforms.functional import to_tensor
 from tqdm import tqdm
 import numpy as np
 from dataclasses import dataclass
@@ -29,6 +33,8 @@ from pycocotools.cocoeval import COCOeval
 # --- 3. Project Imports ---
 import datasets
 from models.faster_rcnn import FasterRCNNModel
+from inference.evaluation import CocoMetrics
+
 
 
 # TODO: Benet, si podem juntar el dos adapters de sota per a fer-ho més modulable amb
@@ -55,7 +61,17 @@ class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
             if box is None:
                 continue
 
-            boxes.append([float(box[0]), float(box[1]), float(box[2]), float(box[3])])
+            x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+            
+            # KITTI MOTS dataset returns inclusive indices for min/max. 
+            # We convert to x2,y2 exclusive for compatibility with width calculation (x2-x1) > 0
+            x2 += 1
+            y2 += 1
+            
+            if x2 <= x1 or y2 <= y1:
+                continue
+                
+            boxes.append([x1, y1, x2, y2])
             labels.append(int(cls))
 
         if len(boxes) == 0:
@@ -137,6 +153,49 @@ class ApplyAlbumentations(torch.utils.data.Dataset):
         return img, target
 
 
+# Albumentations transforms for Faster-RCNN
+def get_transforms(is_train=True, augment=True):
+    if is_train and augment:
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.05, scale_limit=0.10, rotate_limit=10,
+                border_mode=0, p=0.5
+            ),
+            # Weather effects
+            A.OneOf([
+                A.RandomRain(brightness_coefficient=0.9, drop_width=1, blur_value=5, p=1),
+                A.RandomFog(fog_coef_range=(0.3, 1), alpha_coef=0.08, p=1),
+                A.RandomShadow(p=1),
+            ], p=0.3),
+            # Lighting and Color
+            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
+            A.HueSaturationValue(p=0.3),
+            # Occlusion
+            A.CoarseDropout(num_holes_range=(1, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), fill=0, p=0.3),
+            # Blur
+            A.MotionBlur(p=0.2),
+            ToTensorV2()
+        ],
+        bbox_params=A.BboxParams(
+            format='pascal_voc',
+            label_fields=['class_labels'], 
+            clip=True, 
+            min_area=1,
+            min_visibility=0.1
+            )
+        )
+    else:
+        return A.Compose([
+            ToTensorV2()
+        ], 
+        bbox_params=A.BboxParams(
+            format='pascal_voc', 
+            label_fields=['class_labels'],
+            clip=True
+            )
+        )
+
 @dataclass
 class Exp:
     """Container for experiment-level configuration and environment state."""
@@ -154,6 +213,7 @@ class Data:
     classes: List[str]           # List of class names
     train_loader: Any            # DataLoader for the training set
     val_loader: Any              # DataLoader for the val set
+    coco_metrics: Any = None     # CocoMetrics instance for evaluation
 
 
 @dataclass
@@ -173,6 +233,7 @@ class Eval:
     """Container for evaluation outputs."""
     predictions: List[Dict]
     metrics: Dict[str, float]
+    coco_eval: Any = None
 
 
 def collate_fn(batch):
@@ -180,7 +241,7 @@ def collate_fn(batch):
     return list(images), list(targets)
 
 
-def setup_experiment(config_path: str) -> Exp:
+def setup_experiment(config_path: str, args: argparse.Namespace = None) -> Exp:
     """Initialize experiment configuration, logging, and environment.
 
     Loads the YAML configuration file, initializes Weights & Biases logging,
@@ -188,6 +249,7 @@ def setup_experiment(config_path: str) -> Exp:
 
     Args:
         config_path: Path to YAML configuration file.
+        args: Parsed command line arguments to override config.
 
     Returns:
         Exp object containing configuration and environment information.
@@ -196,6 +258,61 @@ def setup_experiment(config_path: str) -> Exp:
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
     
+    # Override config with args if provided (for sweeps)
+    if args:
+        if args.epochs:
+            cfg['training']['epochs'] = args.epochs
+        if args.batch_size:
+            cfg['training']['batch_size'] = args.batch_size
+        if args.lr:
+            cfg['training']['lr'] = args.lr
+        
+        # Override project/name if provided
+        if args.project:
+            cfg['project'] = args.project
+        if args.name:
+            cfg['experiment_name'] = args.name
+        
+        # New data splitting arguments
+        cfg['data'] = cfg.get('data', {})
+        if args.mode:
+            cfg['data']['mode'] = args.mode
+        else:
+            cfg['data'].setdefault('mode', 'full') # Default to full if not specified
+            
+        if args.seed:
+            cfg['data']['seed'] = args.seed
+        else:
+            cfg['data'].setdefault('seed', 42)
+            
+        if args.split_ratio:
+            cfg['data']['split_ratio'] = args.split_ratio
+        else:
+            cfg['data'].setdefault('split_ratio', 0.8)
+
+        # Sweep overrides for boolean flags (using int 0/1 or str 'true'/'false' for safer sweep passing)
+        if args.train_backbone is not None:
+            # Handle string/int inputs common in sweeps
+            val = str(args.train_backbone).lower()
+            cfg['training']['train_backbone'] = (val == 'true' or val == '1')
+            
+        if args.augment is not None:
+             val = str(args.augment).lower()
+             cfg['training']['augment'] = (val == 'true' or val == '1')
+
+
+    # Auto-generate experiment name if not provided (or if it's the default "faster_rcnn_baseline")
+    # We check if args.name was provided to override, otherwise generate
+    if not args.name:
+        aug_str = "Aug" if cfg['training'].get('augment', True) else "NoAug"
+        backbone_str = "Backbone" if cfg['training'].get('train_backbone', False) else "Frozen"
+        base_name = cfg['model']['name']
+        
+        # Only auto-name if user didn't explicitly set a custom name in CLI
+        # (We assume config file name is generic if we are sweeping)
+        cfg['experiment_name'] = f"{base_name}_{aug_str}_{backbone_str}"
+        print(f"Auto-generated Experiment Name: {cfg['experiment_name']}")
+
     # WandB init
     wandb.init(project=cfg.get('project', 'kitti-mots-finetune'), 
                name=cfg.get('experiment_name', 'run'),
@@ -203,6 +320,10 @@ def setup_experiment(config_path: str) -> Exp:
 
     output_dir = os.path.join(cfg.get('output_dir', 'results'), f"{cfg.get('experiment_name', 'exp')}_{wandb.run.id}")
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Save the effective configuration
+    with open(os.path.join(output_dir, "config.yaml"), "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -222,29 +343,52 @@ def setup_data(exp: Exp) -> Data:
     """
 
     cfg = exp.cfg
-    root = cfg['data']['root'] 
-    
-    # Data loading
-    train_base = datasets.KITTIMOTS(root, split="train", ann_source="txt")
-    train_ds = ApplyAlbumentations(KITTIMOTSToTorchvision(train_base), tf=get_transforms(True))
+    root = cfg['data']['root']     
+    mode = cfg['data'].get('mode', 'full')
+    seed = cfg['data'].get('seed', 42)
+    split_ratio = cfg['data'].get('split_ratio', 0.8)
+    augment = cfg['training'].get('augment', True)
 
-    val_base = datasets.KITTIMOTS(root, split="validation")
-    val_ds = ApplyAlbumentations(KITTIMOTSToTorchvision(val_base), tf=get_transforms(False))
+    if mode == "search":
+        train_split = "train"
+        val_split = "dev"
+    elif mode == "full":
+        train_split = "train_full"
+        val_split = "validation"
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
+
+    train_base = datasets.KITTIMOTS(root, split=train_split, ann_source="txt",
+                                    seed=seed,
+                                    split_ratio=split_ratio)
+    
+    train_ds = ApplyAlbumentations(KITTIMOTSToTorchvision(train_base), tf=get_transforms(is_train=True, augment=augment))
+
+    val_base = datasets.KITTIMOTS(root, split=val_split,
+                                  seed=seed,
+                                  split_ratio=split_ratio)
+    val_ds = ApplyAlbumentations(KITTIMOTSToTorchvision(val_base), tf=get_transforms(is_train=False))
 
     print(f"Data Loaded: {len(train_ds)} Train, {len(val_ds)} Val")
+    print(f"Mode: {mode}, Seed: {seed}, Split: {train_split}/{val_split}")
 
     train_loader = DataLoader(train_ds, 
                               batch_size=cfg['training']['batch_size'], 
                               shuffle=True, collate_fn=collate_fn, 
-                              num_workers=cfg['data'].get('num_workers', 4))
+                              num_workers=cfg['data'].get('num_workers', 4),
+                              pin_memory=True, persistent_workers=True)
     
     val_loader = DataLoader(val_ds, 
-                            batch_size=1, 
+                            batch_size=cfg['training'].get('val_batch_size', 4), 
                             shuffle=False, collate_fn=collate_fn, 
-                            num_workers=cfg['data'].get('num_workers', 4))
+                            num_workers=cfg['data'].get('num_workers', 4),
+                            pin_memory=True, persistent_workers=True)
     
     classes = ["Background", "Car", "Pedestrian"]
-    return Data(classes, train_loader, val_loader)
+    
+    coco_metrics = CocoMetrics(root=root, split=val_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
+    
+    return Data(classes, train_loader, val_loader, coco_metrics)
 
 
 def build_scheduler(optimizer, cfg):
@@ -317,39 +461,6 @@ def setup_model(exp: Exp, data: Data) -> Run:
     
     return Run(model, optimizer, history, scheduler, best_map=0.0, best_epoch=0)
 
-# Albumentations transforms for Faster-RCNN
-def get_transforms(is_train=True):
-    if is_train:
-        return A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.ShiftScaleRotate(
-                shift_limit=0.02, scale_limit=0.10, rotate_limit=5,
-                border_mode=0, p=0.5
-            ),
-            A.RandomBrightnessContrast(p=0.3),
-            A.HueSaturationValue(p=0.2),
-            A.MotionBlur(p=0.1),
-            ToTensorV2()
-        ],
-        bbox_params=A.BboxParams(
-            format='pascal_voc',
-            label_fields=['class_labels'], 
-            clip=True, 
-            min_area=1,
-            min_visibility=0.1
-            )
-        )
-    else:
-        return A.Compose([
-            ToTensorV2()
-        ], 
-        bbox_params=A.BboxParams(
-            format='pascal_voc', 
-            label_fields=['class_labels'],
-            clip=True
-            )
-        )
-
 
 def _to_xywh(box_xyxy):
     x1, y1, x2, y2 = box_xyxy
@@ -365,108 +476,55 @@ def evaluate(exp: Exp, data: Data, run: Run) -> Eval:
     if model is None:
         return Eval([], {"coco/AP": 0.0})
 
-    # Load best weights if available
-    if os.path.exists(exp.best_model_path):
-        model.load_state_dict(torch.load(exp.best_model_path, map_location=device))
-
     model.eval()
 
-    # Build COCO GT dict
-    coco_gt_dict = {
-        "images": [],
-        "annotations": [],
-        "categories": [
-            {"id": 1, "name": "car"},
-            {"id": 2, "name": "pedestrian"},
-        ],
-    }
-
+    # Build COCO DT list
     coco_dt_list = []
-    ann_id = 1
+    
+    # Mapping: Model class ID -> COCO category ID
+    # Model: 1=Car, 2=Pedestrian
+    # COCO: 3=Car, 1=Person
+    map_label = {1: 3, 2: 1}
 
     with torch.no_grad():
-        for images, targets in tqdm(val_loader, desc="COCO eval"):
-            img = images[0].to(device)
-            tgt = targets[0]
+        for images, targets in val_loader:
+            # Batch inference
+            imgs = [img.to(device) for img in images]
+            preds = model(imgs)
 
-            image_id = int(tgt["image_id"].item())
-            H, W = img.shape[-2], img.shape[-1]
+            for i, pred in enumerate(preds):
+                tgt = targets[i]
+                image_id = int(tgt["image_id"].item())
 
-            coco_gt_dict["images"].append({
-                "id": image_id,
-                "width": int(W),
-                "height": int(H),
-                "file_name": str(image_id),
-            })
+                pb = pred["boxes"].detach().cpu().numpy()
+                pl = pred["labels"].detach().cpu().numpy()
+                ps = pred["scores"].detach().cpu().numpy()
 
-            # GT annotations
-            gt_boxes = tgt["boxes"].cpu().numpy()
-            gt_labels = tgt["labels"].cpu().numpy()
+                for b, c, s in zip(pb, pl, ps):
+                    cat_id = int(c)
+                    if cat_id not in map_label:
+                        continue 
+                    
+                    coco_cat_id = map_label[cat_id]
+                    x, y, w, h = _to_xywh(b)
+                    
+                    coco_dt_list.append({
+                        "image_id": image_id,
+                        "category_id": coco_cat_id,
+                        "bbox": [x, y, w, h],
+                        "score": float(s),
+                    })
 
-            for b, c in zip(gt_boxes, gt_labels):
-                # IMPORTANT: COCO category_id must match your label IDs (1,2)
-                cat_id = int(c)
-                if cat_id == 0:
-                    continue  # background should never appear, but just in case
+    # Run COCOeval using shared logic
+    if not coco_dt_list:
+        print("No predictions generated.")
+        return Eval(predictions=[], metrics={"coco/AP": 0.0})
 
-                x, y, w, h = _to_xywh(b)
-                area = float(max(w, 0.0) * max(h, 0.0))
+    coco_gt = data.coco_metrics.coco_gt
+    coco_dt = coco_gt.loadRes(coco_dt_list)
+    
+    metrics = data.coco_metrics.compute_metrics(coco_dt)
 
-                coco_gt_dict["annotations"].append({
-                    "id": ann_id,
-                    "image_id": image_id,
-                    "category_id": cat_id,
-                    "bbox": [x, y, w, h],
-                    "area": area,
-                    "iscrowd": 0,
-                })
-                ann_id += 1
-
-            # Predictions (no targets in eval)
-            preds = model([img])[0]
-            pb = preds["boxes"].detach().cpu().numpy()
-            pl = preds["labels"].detach().cpu().numpy()
-            ps = preds["scores"].detach().cpu().numpy()
-
-            for b, c, s in zip(pb, pl, ps):
-                cat_id = int(c)
-                x, y, w, h = _to_xywh(b)
-                coco_dt_list.append({
-                    "image_id": image_id,
-                    "category_id": cat_id,
-                    "bbox": [x, y, w, h],
-                    "score": float(s),
-                })
-
-    # Run COCOeval
-    coco_gt = COCO()
-    coco_gt.dataset = coco_gt_dict
-    coco_gt.createIndex()
-
-    coco_dt = coco_gt.loadRes(coco_dt_list) if len(coco_dt_list) else coco_gt.loadRes([])
-
-    coco_eval = COCOeval(coco_gt, coco_dt, iouType="bbox")
-    coco_eval.evaluate()
-    coco_eval.accumulate()
-    coco_eval.summarize()
-
-    stats = coco_eval.stats  # 12 numbers
-    metrics = {
-        "coco/AP": float(stats[0]),         # AP @[.5:.95]
-        "coco/AP50": float(stats[1]),       # AP @0.5
-        "coco/AP75": float(stats[2]),       # AP @0.75
-        "coco/AP_small": float(stats[3]),
-        "coco/AP_medium": float(stats[4]),
-        "coco/AP_large": float(stats[5]),
-        "coco/AR1": float(stats[6]),
-        "coco/AR10": float(stats[7]),
-        "coco/AR100": float(stats[8]),
-        "coco/AR_small": float(stats[9]),
-        "coco/AR_medium": float(stats[10]),
-        "coco/AR_large": float(stats[11]),
-    }
-
-    wandb.log(metrics)
     return Eval(predictions=coco_dt_list, metrics=metrics)
 
 
@@ -500,12 +558,13 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         return run
 
     print("Starting training...")
-    for epoch in tqdm(range(cfg['training']['epochs']), desc="TRAINING THE MODEL"):
+    for epoch in tqdm(range(cfg['training']['epochs']), desc="TRAINING THE MODEL", mininterval=60, ascii=True):
         model.train()
         train_loss_sum = 0.0
 
-        prog_bar = tqdm(data.train_loader, desc=f"Epoch {epoch+1}")
-        for images, targets in prog_bar:
+        # prog_bar = tqdm(data.train_loader, desc=f"Epoch {epoch+1}", mininterval=60, ascii=True)
+        # for images, targets in prog_bar:
+        for images, targets in data.train_loader:
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
@@ -517,7 +576,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             optimizer.step()
             
             train_loss_sum += float(losses.item())
-            prog_bar.set_postfix(loss=float(losses.item()))
+            # prog_bar.set_postfix(loss=float(losses.item()))
         
         train_loss = train_loss_sum / max(1, len(train_loader))
 
@@ -525,7 +584,8 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         model.train()
         val_loss_sum = 0.0
         with torch.no_grad():
-            for images, targets in tqdm(val_loader, desc=f"Epoch {epoch+1} [val-loss]"):
+            # for images, targets in tqdm(val_loader, desc=f"Epoch {epoch+1} [val-loss]", mininterval=60, ascii=True):
+            for images, targets in val_loader:
                 images = [img.to(device) for img in images]
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
                 loss_dict = model(images, targets)
@@ -535,7 +595,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         # ---- VAL COCO METRICS ----
         eval_ = evaluate(exp, data, run)   # uses val_loader internally
-        val_map = eval_.metrics["coco/AP"]
+        val_map = eval_.metrics["overall/AP"]
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
@@ -555,15 +615,26 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             best_epoch = epoch
             torch.save(model.state_dict(), best_model_path)
             print(f"  >>> New Best Model: COCO AP {best_map:.4f} at Epoch {epoch+1}")
+            
+            # Save metrics
+            with open(os.path.join(exp.output_dir, "best_metrics.json"), "w") as f:
+                json.dump(eval_.metrics, f, indent=4)
+                
+            # Save predictions as JSONL
+            with open(os.path.join(exp.output_dir, "best_predictions.jsonl"), "w") as f:
+                for p in eval_.predictions:
+                    f.write(json.dumps(p) + "\n")
 
-        wandb.log({
+        wandb_log_dict = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
             "val_loss": val_loss,
             "val_coco_ap": val_map,
             "best_map": best_map,
             "best_epoch": best_epoch,
-        })
+        }
+        wandb_log_dict.update(eval_.metrics)
+        wandb.log(wandb_log_dict)
 
     print(f"Training finished. Best model: COCO AP {best_map:.4f} at Epoch {best_epoch+1}")
     run.best_map = best_map
@@ -571,8 +642,8 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     run.history = history
     return run
 
-def main(config_path: str) -> None:
-    exp = setup_experiment(config_path)
+def main(args: argparse.Namespace) -> None:
+    exp = setup_experiment(args.config, args)
     data = setup_data(exp)
     run = setup_model(exp, data)
     run = train(exp, data, run)
@@ -580,6 +651,24 @@ def main(config_path: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    
+    # Sweep overrides
+    parser.add_argument("--epochs", type=int, help="Override number of epochs")
+    parser.add_argument("--batch_size", type=int, help="Override batch size")
+    parser.add_argument("--lr", type=float, help="Override learning rate")
+    parser.add_argument("--project", type=str, help="Override wandb project name")
+    parser.add_argument("--name", type=str, help="Override experiment name")
+    
+    # Data split arguments
+    parser.add_argument("--mode", type=str, choices=["full", "search"], help="Training mode: 'full' (train on all train, eval on val) or 'search' (train on sub-train, eval on dev)")
+    parser.add_argument("--seed", type=int, help="Random seed for data splitting")
+    parser.add_argument("--split_ratio", type=float, help="Ratio of training data to keep in 'search' mode")
+    
+    # Sweep arguments (accepting string 'true'/'false' or int 0/1)
+    parser.add_argument("--train_backbone", type=str, help="Override train_backbone (true/false)")
+    parser.add_argument("--augment", type=str, help="Override augment (true/false)")
+
     args = parser.parse_args()
-    main(args.config)
+    main(args)
