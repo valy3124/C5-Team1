@@ -9,6 +9,7 @@ import json
 import argparse
 import wandb
 from pathlib import Path
+from typing import Dict
 
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
@@ -20,9 +21,9 @@ def xyxy_to_xywh(bbox_xyxy):
     return [x1, y1, x2-x1, y2-y1]
 
 class CocoMetrics:
-    def __init__(self, root: str, split: str = "validation", ann_source: str = "txt"):
+    def __init__(self, root: str, split: str = "validation", ann_source: str = "txt", seed: int = 42, split_ratio: float = 0.8):
         print(f"Initializing KITTI-MOTS dataset from {root} (split: {split})...")
-        self.dataset = KITTIMOTS(root=root, split=split, ann_source=ann_source, compute_boxes=True)
+        self.dataset = KITTIMOTS(root=root, split=split, ann_source=ann_source, compute_boxes=True, seed=seed, split_ratio=split_ratio)
         self.categories = [{"id": 1, "name": "person"}, {"id": 3, "name": "car"}]
         
         # Build COCO GT object immediately
@@ -75,6 +76,62 @@ class CocoMetrics:
         print(f"GT Loaded: {len(annotations)} annotations across {len(images)} images.")
         return coco
 
+    def compute_metrics(self, coco_dt: COCO) -> Dict[str, float]:
+        """
+        Run COCO evaluation on the provided COCO result object.
+        Returns a dictionary of metrics.
+        """
+        print("Running COCO Evaluation...")
+        coco_eval = COCOeval(self.coco_gt, coco_dt, 'bbox')
+        coco_eval.evaluate()
+        coco_eval.accumulate()
+        coco_eval.summarize()
+
+        stats = coco_eval.stats
+        metrics = {
+            "overall/AP": stats[0],
+            "overall/AP_50": stats[1],
+            "overall/AP_75": stats[2],
+            "overall/AP_small": stats[3],
+            "overall/AP_medium": stats[4],
+            "overall/AP_large": stats[5],
+            "overall/AR_max1": stats[6],
+            "overall/AR_max10": stats[7],
+            "overall/AR_max100": stats[8],
+            "overall/AR_small": stats[9],
+            "overall/AR_medium": stats[10],
+            "overall/AR_large": stats[11],
+        }
+        
+        print("\n--- Per-Class Metrics ---")
+        for cat_dict in self.categories:
+            cat_id, cat_name = cat_dict["id"], cat_dict["name"]
+            
+            coco_eval_cat = COCOeval(self.coco_gt, coco_dt, 'bbox')
+            coco_eval_cat.params.catIds = [cat_id] # Only evaluate this category
+            coco_eval_cat.evaluate()
+            coco_eval_cat.accumulate()
+            coco_eval_cat.summarize()
+            
+            cat_stats = coco_eval_cat.stats
+            cat_metrics = {
+                f"{cat_name}/AP": cat_stats[0],
+                f"{cat_name}/AP_50": cat_stats[1],
+                f"{cat_name}/AP_75": cat_stats[2],
+                f"{cat_name}/AP_small": cat_stats[3],
+                f"{cat_name}/AP_medium": cat_stats[4],
+                f"{cat_name}/AP_large": cat_stats[5],
+                f"{cat_name}/AR_max1": cat_stats[6],
+                f"{cat_name}/AR_max10": cat_stats[7],
+                f"{cat_name}/AR_max100": cat_stats[8],
+                f"{cat_name}/AR_small": cat_stats[9],
+                f"{cat_name}/AR_medium": cat_stats[10],
+                f"{cat_name}/AR_large": cat_stats[11],
+            }
+            metrics.update(cat_metrics)
+            
+        return metrics
+
     def evaluate(self, pred_path: str):
         print(f"Loading predictions from {pred_path}...")
         coco_results = []
@@ -98,50 +155,41 @@ class CocoMetrics:
         
         # Build COCO DT object from predictions
         coco_dt = self.coco_gt.loadRes(coco_results)
+        metrics = self.compute_metrics(coco_dt)
+        if wandb.run is not None:
+            wandb.log(metrics)
+        return metrics
 
-        print("Running COCO Evaluation...")
-        coco_eval = COCOeval(self.coco_gt, coco_dt, 'bbox')
-        coco_eval.evaluate()
-        coco_eval.accumulate()
-        coco_eval.summarize()
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run evaluation on KITTI-MOTS dataset")
 
-        wandb.log({
-            "overall/AP": coco_eval.stats[0],
-            "overall/AP_50": coco_eval.stats[1],
-            "overall/AP_75": coco_eval.stats[2],
-            "overall/AP_small": coco_eval.stats[3],
-            "overall/AP_medium": coco_eval.stats[4],
-            "overall/AP_large": coco_eval.stats[5],
-            "overall/AR_max1": coco_eval.stats[6],
-            "overall/AR_max10": coco_eval.stats[7],
-            "overall/AR_max100": coco_eval.stats[8],
-            "overall/AR_small": coco_eval.stats[9],
-            "overall/AR_medium": coco_eval.stats[10],
-            "overall/AR_large": coco_eval.stats[11],
-        })
-        
-        print("\n--- Per-Class Metrics ---")
-        for cat_dict in self.categories:
-            cat_id, cat_name = cat_dict["id"], cat_dict["name"]
-            print(f"\nCategory: {cat_name.capitalize()}")
+    # Inference arguments
+    parser.add_argument("--root", type=str, default="~/mcv/datasets/C5/KITTI-MOTS/", help="Path to KITTI-MOTS dataset")
+    parser.add_argument("--split", type=str, default="validation", help="Split to evaluate on (validation, dev, etc.)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for splitting")
+    parser.add_argument("--split_ratio", type=float, default=0.8, help="Split ratio for training")
+    parser.add_argument("--preds", required=True, help="Path to predictions.jsonl")
+    
+    return parser.parse_args()
 
-            coco_eval = COCOeval(self.coco_gt, coco_dt, 'bbox')
-            coco_eval.params.catIds = [cat_id] # Only evaluate this category
-            coco_eval.evaluate()
-            coco_eval.accumulate()
-            coco_eval.summarize()
+if __name__ == "__main__":
+    args = parse_args()
+    
+    # Initialize and Run
+    metrics = CocoMetrics(root=args.root, split=args.split, seed=args.seed, split_ratio=args.split_ratio)
 
-            wandb.log({
-                f"{cat_name}/AP": coco_eval.stats[0],
-                f"{cat_name}/AP_50": coco_eval.stats[1],
-                f"{cat_name}/AP_75": coco_eval.stats[2],
-                f"{cat_name}/AP_small": coco_eval.stats[3],
-                f"{cat_name}/AP_medium": coco_eval.stats[4],
-                f"{cat_name}/AP_large": coco_eval.stats[5],
-                f"{cat_name}/AR_max1": coco_eval.stats[6],
-                f"{cat_name}/AR_max10": coco_eval.stats[7],
-                f"{cat_name}/AR_max100": coco_eval.stats[8],
-                f"{cat_name}/AR_small": coco_eval.stats[9],
-                f"{cat_name}/AR_medium": coco_eval.stats[10],
-                f"{cat_name}/AR_large": coco_eval.stats[11],
-            })
+    # Format experiment name or assign default
+    filename = Path(args.preds).name
+    exp_name = filename.removesuffix("_results.jsonl")
+    if exp_name == filename:
+        exp_name = "default_experiment"
+    
+    wandb.init(
+        entity="c5-team1",
+        project="COCO-evaluation",
+        name=exp_name
+    )
+
+    metrics.evaluate(pred_path=args.preds)
+
+    wandb.finish()

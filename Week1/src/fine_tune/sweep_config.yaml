@@ -1,0 +1,18 @@
+program: src/fine_tune/fine_tune.py
+project: "Fine-tune Faster R-CNN KITTI-MOTS"
+method: grid
+metric:
+  name: val_coco_ap
+  goal: maximize
+parameters:
+  augment:
+    values: [true, false]
+  train_backbone:
+    values: [true, false]
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "src/fine_tune/config_example.yaml"
+  - ${args}

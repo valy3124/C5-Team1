@@ -1,4 +1,21 @@
-__pycache__
-Week1/yolov8s.pt
+# Python
+__pycache__/
+*.pyc
+
+# Logs and Results
+logs/
+results/
+*.jsonl
+*.log
+*.out
+
 # Weights & Biases local files
 wandb/
+
+# Checkpoints
+.ipynb_checkpoints/
+*.pt
+*.pth
+
+# Project specific
+Week1/yolov8s.pt

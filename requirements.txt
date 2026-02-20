@@ -17,3 +17,4 @@ ultralytics
 pycocotools
 albumentations
 thop # For calculating FLOPs
+timm # For loading models
