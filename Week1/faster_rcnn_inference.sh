@@ -1,0 +1,1 @@
+python -m src.inference.run_inference --model faster_rcnn --output faster_rcnn_results.jsonl
