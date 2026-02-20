@@ -160,6 +160,9 @@ class CocoMetrics:
             wandb.log(metrics)
         return metrics
 
+
+
+# TODO IS THIS USED?
 def parse_args():
     parser = argparse.ArgumentParser(description="Run evaluation on KITTI-MOTS dataset")
 

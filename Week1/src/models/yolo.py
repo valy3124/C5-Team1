@@ -73,7 +73,8 @@ class UltralyticsYOLO:
         if isinstance(images, Image.Image):
             images = [images]
             single_input = True
-
+        
+        # It internally switches to eval mode.
         results = self.model.predict(
             source=images,
             imgsz=max(max(img.size) for img in images),

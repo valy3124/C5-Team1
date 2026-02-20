@@ -74,14 +74,14 @@ class FasterRCNNModel:
         self.model.to(self.device)
 
     @torch.no_grad()
-    def predict(self, image: Image.Image) -> Dict[str, Any]:
+    def predict(self, images: Union[Image.Image, List[Image.Image]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        Run inference on a single image
+        Run inference on a single image or a list of images
 
         Args
         -----
-        image : PIL.Image.Image
-            Input RGB image
+        images : PIL.Image.Image or List[PIL.Image.Image]
+            Input RGB image or list of RGB images
 
         Returns
         -----
@@ -92,23 +92,38 @@ class FasterRCNNModel:
                 "category_ids": np.ndarray (N,),
             }
         """
-        # Since we might fien tune using this model, ensure we do not change eval state forever
+        single_input = False
+        if isinstance(images, Image.Image):
+            images = [images]
+            single_input = True
+
+        # Preserve original training state
         was_training = self.model.training
         self.model.eval()
+
         try:
-            img = to_tensor(image).to(self.device)
+            tensors = [to_tensor(img).to(self.device) for img in images]
+
             if self.half:
-                # safer than pure f16, use autocast
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    result = self.model([img])[0]
+                    results = self.model(tensors)
             else:
-                result = self.model([img])[0]
+                results = self.model(tensors)
+
         finally:
             if was_training:
                 self.model.train()
- 
-        return {
-            "bboxes_xyxy": result["boxes"].detach().cpu().numpy().astype(np.float32),
-            "scores": result["scores"].detach().cpu().numpy().astype(np.float32),
-            "category_ids": result["labels"].detach().cpu().numpy().astype(np.int64),
-        }
+
+        # The mapping done in dataset.py is already aligned with faster_rcnn model
+        outputs = []
+        for result in results:
+            outputs.append({
+                "bboxes_xyxy": result["boxes"].detach().cpu().numpy().astype(np.float32),
+                "scores": result["scores"].detach().cpu().numpy().astype(np.float32),
+                "category_ids": result["labels"].detach().cpu().numpy().astype(np.int64),
+            })
+
+        if single_input:
+            return outputs[0]
+
+        return outputs

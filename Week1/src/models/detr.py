@@ -50,8 +50,6 @@ class HuggingFaceDETR:
         # Apply Half Precision if requested
         if self.half:
             self.model.half()
-            
-        self.model.eval()
 
     def predict(self, image: Union[Image.Image, List[Image.Image]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
@@ -77,35 +75,43 @@ class HuggingFaceDETR:
             image = [image]
             single_input = True
 
-        # 1. Preprocessing
-        inputs = self.processor(images=image, return_tensors="pt")
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        # Since we might fine tune using this model, ensure we do not change eval state forever
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            # 1. Preprocessing
+            inputs = self.processor(images=image, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        # Handle FP16 inputs if model is in half precision
-        if self.half:
-            inputs["pixel_values"] = inputs["pixel_values"].half()
+            # Handle FP16 inputs if model is in half precision
+            if self.half:
+                inputs["pixel_values"] = inputs["pixel_values"].half()
 
-        # 2. Inference
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+            # 2. Inference
+            with torch.no_grad():
+                outputs = self.model(**inputs)
 
-        # 3. Post-processing (Image.size is WxH, but DETR expeects HxW)
-        target_sizes = torch.tensor(
-            [img.size[::-1] for img in image]
-        ).to(self.device)
+        finally:
+            if was_training:
+                self.model.train()
+
+        # 3. Post-processing (Image.size is WxH, but DETR expects HxW)
+        target_sizes = torch.tensor([img.size[::-1] for img in image]).to(self.device)
 
         results = self.processor.post_process_object_detection(
             outputs,
             target_sizes=target_sizes,
-            threshold=self.conf
+            threshold=self.conf,
         )
 
-        outputs_list = []
+        outputs_list: List[Dict[str, Any]] = []
+
+        # The mapping done in dataset.py is already aligned with DETR model
         for result in results:
             outputs_list.append({
-                "bboxes_xyxy": result["boxes"].cpu().numpy().astype(np.float32),
-                "scores": result["scores"].cpu().numpy().astype(np.float32),
-                "category_ids": result["labels"].cpu().numpy().astype(np.int64),
+                "bboxes_xyxy": result["boxes"].detach().cpu().numpy().astype(np.float32),
+                "scores": result["scores"].detach().cpu().numpy().astype(np.float32),
+                "category_ids": result["labels"].detach().cpu().numpy().astype(np.int64),
             })
 
         return outputs_list[0] if single_input else outputs_list
