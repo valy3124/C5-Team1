@@ -840,15 +840,10 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         if (epoch + 1) % log_interval == 0:
             log_predictions_to_wandb(exp, data, run, epoch=epoch + 1)
 
-        # AP for Cars and Pedestrian classes
-        car_ap = eval_result.metrics.get("car/AP", 0.0)
-        pedestrian_ap = eval_result.metrics.get("person/AP", 0.0)
-        
         print(
             f"Epoch {epoch + 1}/{num_epochs}  |  "
             f"train_loss: {train_loss:.4f}  val_loss: {val_loss:.4f}  "
-            f"val_COCO_AP: {val_map:.4f}  |  "
-            f"Car_AP: {car_ap:.4f}  Pedestrian_AP: {pedestrian_ap:.4f}"
+            f"val_COCO_AP: {val_map:.4f}"
         )
 
         # ---- LR scheduler step ----
@@ -877,8 +872,6 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             "val_coco_ap": val_map,
             "best_map":    best_map,
             "best_epoch":  best_epoch,
-            "val_car_AP": car_ap,
-            "val_pedestrian_AP": pedestrian_ap,
         }
         wandb_log.update({f"val_{k}": v for k, v in eval_result.metrics.items()})
         wandb.log(wandb_log)
@@ -886,7 +879,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         # ---- CSV logging ----
         csv_path = os.path.join(exp.output_dir, "metrics_history.csv")
         write_header = not os.path.isfile(csv_path)
-        headers = ["epoch", "train_loss", "val_loss", "best_map", "car_AP", "pedestrian_AP"] + [
+        headers = ["epoch", "train_loss", "val_loss", "best_map"] + [
             f"val_{k}" for k in eval_result.metrics.keys()
         ]
 
@@ -894,8 +887,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             if write_header:
                 fh.write(",".join(headers) + "\n")
             row = (
-                [str(epoch + 1), f"{train_loss:.6f}", f"{val_loss:.6f}", f"{best_map:.6f}", 
-                 f"{car_ap:.6f}", f"{pedestrian_ap:.6f}"]
+                [str(epoch + 1), f"{train_loss:.6f}", f"{val_loss:.6f}", f"{best_map:.6f}"]
                 + [f"{v:.6f}" for v in eval_result.metrics.values()]
             )
             fh.write(",".join(row) + "\n")
