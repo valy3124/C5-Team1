@@ -1,11 +1,11 @@
 """
-fine_tune.py — Fine-tuning script for Faster R-CNN on KITTI-MOTS.
+fine_tune_detr.py — Fine-tuning script for DETR on KITTI-MOTS.
 
-This script is intentionally scoped to **torchvision Faster R-CNN only**.
-HuggingFace DETR and Ultralytics YOLO use different training APIs and should
+This script is intentionally scoped to **HuggingFace DETR only**.
+Torchvision Faster R-CNN and Ultralytics YOLO use different training APIs and should
 be fine-tuned with their own dedicated scripts:
 
-    fine_tune_detr.py  – HuggingFace Transformers / DETR
+    fine_tune.py       – Torchvision Faster R-CNN
     fine_tune_yolo.py  – Ultralytics YOLO
 
 All three scripts share the same data pipeline (KITTI-MOTS dataset wrappers,
@@ -14,7 +14,7 @@ Albumentations augmentation, COCO evaluation) so that results are comparable.
 Pipeline overview (this script):
     1. setup_experiment  – load YAML config, init W&B, create output directory.
     2. setup_data        – build KITTI-MOTS datasets + DataLoaders.
-    3. setup_model       – instantiate Faster R-CNN, optimizer, and scheduler.
+    3. setup_model       – instantiate DETR, ImageProcessor, optimizer, and scheduler.
     4. train             – run the training loop with periodic COCO evaluation.
 """
 
@@ -25,8 +25,8 @@ import os
 import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))  # …/fine_tune/
-src_dir     = os.path.dirname(current_dir)                 # …/src/
-week1_dir   = os.path.dirname(src_dir)                     # …/Week1/
+src_dir     = os.path.dirname(current_dir)                # …/src/
+week1_dir   = os.path.dirname(src_dir)                    # …/Week1/
 
 for p in (src_dir, week1_dir):
     if p not in sys.path:
@@ -50,13 +50,13 @@ from torch.utils.data import DataLoader
 from torchvision.transforms.functional import to_tensor
 from tqdm import tqdm
 from typing import Any, Dict, List, Optional
+from transformers import DetrForObjectDetection, DetrImageProcessor
 
 # ---------------------------------------------------------------------------
 # 3. Project imports
 # ---------------------------------------------------------------------------
 import datasets
 from inference.evaluation import CocoMetrics
-from models.faster_rcnn import FasterRCNNModel
 
 
 # ===========================================================================
@@ -64,12 +64,11 @@ from models.faster_rcnn import FasterRCNNModel
 # ===========================================================================
 
 class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
-    """Adapter that converts a raw KITTI-MOTS dataset into the format expected
-    by torchvision Faster R-CNN.
+    """Adapter that converts a raw KITTI-MOTS dataset into a format suitable
+    for Albumentations and later HuggingFace Processors.
 
     The raw dataset yields ``(PIL.Image, [annotation], metadata)`` tuples.
-    This adapter converts them to ``(np.ndarray image, target dict)`` tuples
-    suitable for the Albumentations pipeline that follows.
+    This adapter converts them to ``(np.ndarray image, target dict)`` tuples.
 
     Target dict schema
     ------------------
@@ -93,7 +92,7 @@ class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
         return img_np, target
 
     def _build_target(self, raw_anns: List[Any], image_id: int) -> Dict[str, torch.Tensor]:
-        """Convert raw annotation objects into a torchvision-compatible target dict."""
+        """Convert raw annotation objects into a compatible target dict."""
         boxes, labels = [], []
 
         for ann in raw_anns:
@@ -343,6 +342,7 @@ class Data:
 class Run:
     """Model, optimizer, scheduler, and live training state."""
     model:      Any               # Torch model instance
+    processor:  Any               # HF DetrImageProcessor
     optimizer:  Any               # Optimizer instance (AdamW, SGD, …)
     history:    Dict[str, list]   # Tracked metrics per epoch
     scheduler:  Any  = None       # Optional LR scheduler
@@ -365,8 +365,8 @@ class Eval:
 def collate_fn(batch):
     """Custom collate that keeps images and targets as plain Python lists.
 
-    torchvision detection models expect ``List[Tensor]`` inputs, not stacked
-    tensors, so the default collate_fn cannot be used.
+    HF DETR processor will handle the batching and padding dynamically
+    during the training loop.
     """
     images, targets = zip(*batch)
     return list(images), list(targets)
@@ -390,19 +390,7 @@ def _xyxy_to_xywh(box: List[float]) -> List[float]:
 # ===========================================================================
 
 def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
-    """Load config, apply CLI overrides, initialise W&B, and set up I/O paths.
-
-    Config is loaded from ``config_path`` and then selectively overridden by
-    any non-None values in ``args`` (used for hyperparameter sweeps).
-
-    Args:
-        config_path: Path to the YAML configuration file.
-        args:        Parsed command-line arguments.  Non-None values override
-                     the corresponding config entries.
-
-    Returns:
-        Populated ``Exp`` dataclass.
-    """
+    """Load config, apply CLI overrides, initialise W&B, and set up I/O paths."""
     with open(config_path) as fh:
         cfg = yaml.safe_load(fh)
 
@@ -421,7 +409,6 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
     if args.freeze_strategy  is not None: training["freeze_strategy"]  = int(args.freeze_strategy)
     if args.aug_strategy     is not None: training["aug_strategy"]     = str(args.aug_strategy)
     if args.name_fields      is not None: training["name_fields"]      = str(args.name_fields)
-    if args.nms_iou_threshold is not None: training["nms_iou_threshold"] = float(args.nms_iou_threshold)
 
     # Data split settings (seeded sub-splits for hyper-parameter search)
     cfg.setdefault("data", {})
@@ -472,23 +459,7 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
 
 
 def build_scheduler(optimizer, cfg: Dict[str, Any]) -> Optional[Any]:
-    """Construct an LR scheduler from the ``training.scheduler`` config block.
-
-    Supported names (case-insensitive):
-        ``none`` / ``null``      – no scheduler (returns ``None``).
-        ``step`` / ``steplr``   – ``torch.optim.lr_scheduler.StepLR``.
-        ``cosine`` / …          – ``torch.optim.lr_scheduler.CosineAnnealingLR``.
-
-    Args:
-        optimizer: The optimizer instance to wrap.
-        cfg:       Full experiment config dict (reads ``training.scheduler``).
-
-    Returns:
-        A scheduler instance, or ``None`` if no scheduler is configured.
-
-    Raises:
-        ValueError: If an unknown scheduler name is specified.
-    """
+    """Construct an LR scheduler from the ``training.scheduler`` config block."""
     sch_cfg = cfg["training"].get("scheduler")
     if sch_cfg is None:
         return None
@@ -516,23 +487,7 @@ def build_scheduler(optimizer, cfg: Dict[str, Any]) -> Optional[Any]:
 
 
 def setup_data(exp: Exp) -> Data:
-    """Instantiate KITTI-MOTS datasets and wrap them with DataLoaders.
-
-    Two modes are supported:
-        ``full``   – trains on the full training set and evaluates on the
-                     official validation sequences.
-        ``search`` – uses a seeded sub-split of the training set for hyper-
-                     parameter search (train → "dev" split for quick feedback).
-
-    Args:
-        exp: Experiment state produced by ``setup_experiment``.
-
-    Returns:
-        Populated ``Data`` dataclass.
-
-    Raises:
-        ValueError: If an unknown ``data.mode`` value is found in the config.
-    """
+    """Instantiate KITTI-MOTS datasets and wrap them with DataLoaders."""
     cfg          = exp.cfg
     root         = cfg["data"]["root"]
     mode         = cfg["data"].get("mode",         "full")
@@ -589,8 +544,6 @@ def setup_data(exp: Exp) -> Data:
 
     classes = ["Background", "Car", "Pedestrian"]
 
-    # CocoMetrics helpers pre-load the ground-truth COCO annotations once so
-    # that evaluate() can call them repeatedly without re-parsing.
     train_coco_metrics = CocoMetrics(root=root, split=train_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
     val_coco_metrics   = CocoMetrics(root=root, split=val_split,   ann_source="txt", seed=seed, split_ratio=split_ratio)
 
@@ -598,48 +551,59 @@ def setup_data(exp: Exp) -> Data:
 
 
 def setup_model(exp: Exp, data: Data) -> Run:
-    """Instantiate the model, optimizer, and scheduler.
-
-    The model is selected by ``config.model.name``.  Currently only
-    ``faster_rcnn`` is supported.  Add new branches here for DETR/YOLO.
-
-    Args:
-        exp:  Experiment state (config + device).
-        data: Data state (needed to know the number of classes).
-
-    Returns:
-        Populated ``Run`` dataclass with the model ready for training.
-
-    Raises:
-        ValueError: If ``config.model.name`` is not recognised.
-    """
+    """Instantiate the HuggingFace DETR model, processor, optimizer, and scheduler."""
     cfg        = exp.cfg
     device     = exp.device
     model_name = cfg["model"]["name"]
+    weights    = cfg["model"].get("weights", "facebook/detr-resnet-50")
 
-    print(f"Initialising model: {model_name}")
+    print(f"Initialising HuggingFace model: {model_name} from {weights}")
 
-    if model_name == "faster_rcnn":
-        nms_iou      = cfg["training"].get("nms_iou_threshold", 0.5)
-        model        = FasterRCNNModel(device=str(device), iou=nms_iou)
-        num_classes  = len(data.classes)
-        freeze_strat = cfg["training"].get("freeze_strategy", 1)
-        model.prepare_finetune(num_classes, freeze_strat)
-
-        # Only pass parameters that require gradients to the optimizer.
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = optim.AdamW(trainable_params, lr=cfg["training"]["lr"])
-        scheduler = build_scheduler(optimizer, cfg)
-
-    else:
+    if model_name != "detr":
         raise ValueError(
             f"Unknown model '{model_name}'.  "
-            "This script only supports 'faster_rcnn'.  "
-            "Use fine_tune_detr.py for DETR or fine_tune_yolo.py for YOLO."
+            "This script only supports 'detr'.  "
+            "Use fine_tune.py for Faster R-CNN or fine_tune_yolo.py for YOLO."
         )
 
+    processor = DetrImageProcessor.from_pretrained(weights)
+    
+    id2label = {i: label for i, label in enumerate(data.classes)}
+    label2id = {label: i for i, label in enumerate(data.classes)}
+
+    model = DetrForObjectDetection.from_pretrained(
+        weights,
+        num_labels=len(data.classes),
+        ignore_mismatched_sizes=True,
+        id2label=id2label,
+        label2id=label2id,
+    )
+
+    # Implement simple Freeze Strategy for DETR
+    freeze_strat = cfg["training"].get("freeze_strategy", 1)
+    
+    if freeze_strat >= 1:
+        # Level 1: Freeze backbone
+        for param in model.model.backbone.parameters():
+            param.requires_grad = False
+    if freeze_strat >= 2:
+        # Level 2: Freeze transformer encoder
+        for param in model.model.encoder.parameters():
+            param.requires_grad = False
+    if freeze_strat >= 3:
+        # Level 3: Freeze transformer decoder (only train prediction heads)
+        for param in model.model.decoder.parameters():
+            param.requires_grad = False
+
+    model.to(device)
+
+    # Only pass parameters that require gradients to the optimizer.
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = optim.AdamW(trainable_params, lr=cfg["training"]["lr"])
+    scheduler = build_scheduler(optimizer, cfg)
+
     history = {"train_loss": [], "train_map": [], "val_loss": [], "val_map": []}
-    return Run(model, optimizer, history, scheduler, best_map=0.0, best_epoch=0)
+    return Run(model, processor, optimizer, history, scheduler, best_map=0.0, best_epoch=0)
 
 
 # ===========================================================================
@@ -653,23 +617,10 @@ _MODEL_TO_COCO_LABEL = {1: 3, 2: 1}
 
 
 def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> "Eval":
-    """Run inference on ``loader`` and compute COCO detection metrics.
-
-    The model is switched to eval() mode for inference.  No gradients are
-    computed.
-
-    Args:
-        exp:         Experiment state (device).
-        run:         Run state (model).
-        loader:      DataLoader to evaluate on.
-        metrics_obj: ``CocoMetrics`` instance pre-loaded with ground-truth
-                     annotations for the corresponding split.
-
-    Returns:
-        ``Eval`` dataclass with COCO-format predictions and metric values.
-    """
-    model  = run.model
-    device = exp.device
+    """Run inference on ``loader`` and compute COCO detection metrics."""
+    model     = run.model
+    processor = run.processor
+    device    = exp.device
 
     if model is None:
         return Eval(predictions=[], metrics={"coco/AP": 0.0})
@@ -679,22 +630,30 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> "Eval":
 
     with torch.no_grad():
         for images, targets in loader:
-            imgs  = [img.to(device) for img in images]
-            preds = model.predict(imgs)  # → List[Dict[bboxes_xyxy, category_ids, scores]]
+            # Process inputs for DETR (padding and normalization)
+            # do_rescale=False since images are already [0, 1] tensors
+            batch_dict = processor(images=images, return_tensors="pt", do_rescale=False)
+            batch_dict = {k: v.to(device) for k, v in batch_dict.items()}
+            
+            outputs = model(**batch_dict)
+            
+            # Post-process outputs to standard xyxy bounding boxes
+            target_sizes = torch.tensor([img.shape[1:] for img in images]).to(device)
+            results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.0)
 
-            for pred, tgt in zip(preds, targets):
+            for res, tgt in zip(results, targets):
                 image_id = int(tgt["image_id"].item())
 
-                for box, cat, score in zip(pred["bboxes_xyxy"], pred["category_ids"], pred["scores"]):
-                    cat_id = int(cat)
+                for box, score, label in zip(res["boxes"], res["scores"], res["labels"]):
+                    cat_id = int(label.item())
                     if cat_id not in _MODEL_TO_COCO_LABEL:
                         continue  # ignore unknown classes
 
                     coco_dt_list.append({
                         "image_id":   image_id,
                         "category_id": _MODEL_TO_COCO_LABEL[cat_id],
-                        "bbox":        _xyxy_to_xywh(box),
-                        "score":       float(score),
+                        "bbox":        _xyxy_to_xywh(box.cpu().tolist()),
+                        "score":       float(score.item()),
                     })
 
     if not coco_dt_list:
@@ -715,20 +674,10 @@ def log_predictions_to_wandb(
     epoch: int,
     max_images: int = 4,
 ) -> None:
-    """Upload a sample of validation images with predicted and GT boxes to W&B.
-
-    Images are evenly spaced across the validation set to provide a
-    representative view of model performance across different sequences.
-
-    Args:
-        exp:        Experiment state (device).
-        data:       Data state (validation loader + dataset length).
-        run:        Run state (model).
-        epoch:      Current epoch number (logged as metadata).
-        max_images: Maximum number of images to upload per call.
-    """
-    model  = run.model
-    device = exp.device
+    """Upload a sample of validation images with predicted and GT boxes to W&B."""
+    model     = run.model
+    processor = run.processor
+    device    = exp.device
 
     if model is None:
         return
@@ -737,7 +686,6 @@ def log_predictions_to_wandb(
 
     CLASS_NAMES = {1: "Car", 2: "Pedestrian"}
 
-    # Evenly space target indices so we sample from the whole val set.
     dataset_len     = len(data.val_loader.dataset)
     step            = max(1, dataset_len // max_images)
     target_indices  = set(range(0, dataset_len, step))
@@ -748,23 +696,29 @@ def log_predictions_to_wandb(
         for images, targets in data.val_loader:
             batch_size = len(images)
 
-            # Identify which items in this batch fall on a target index.
             log_in_batch = [
                 i for i in range(batch_size)
                 if current_idx + i in target_indices
-            ][:max_images - len(logged_images)]  # cap to remaining quota
+            ][:max_images - len(logged_images)]
 
             if not log_in_batch:
                 current_idx += batch_size
                 continue
 
-            preds = model.predict([images[i].to(device) for i in log_in_batch])
+            # Process only the selected subset to save compute
+            subset_images = [images[i] for i in log_in_batch]
+            batch_dict = processor(images=subset_images, return_tensors="pt", do_rescale=False)
+            batch_dict = {k: v.to(device) for k, v in batch_dict.items()}
+            
+            outputs = model(**batch_dict)
+            target_sizes = torch.tensor([img.shape[1:] for img in subset_images]).to(device)
+            results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.25)
 
-            for pred, i in zip(preds, log_in_batch):
+            for res, i in zip(results, log_in_batch):
                 img_np = (images[i].cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                 tgt    = targets[i]
 
-                # --- Predicted boxes (score-filtered) ---
+                # --- Predicted boxes ---
                 wandb_pred_boxes = [
                     {
                         "position":    {"minX": float(b[0]), "minY": float(b[1]),
@@ -774,8 +728,7 @@ def log_predictions_to_wandb(
                         "scores":      {"score": float(s)},
                         "domain":      "pixel",
                     }
-                    for b, l, s in zip(pred["bboxes_xyxy"], pred["category_ids"], pred["scores"])
-                    if s >= 0.25  # discard very low-confidence detections
+                    for b, l, s in zip(res["boxes"], res["labels"], res["scores"])
                 ]
 
                 # --- Ground-truth boxes ---
@@ -808,29 +761,12 @@ def log_predictions_to_wandb(
 # ===========================================================================
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
-    """Run the full training loop and persist the best checkpoint.
-
-    Each epoch:
-        1. Forward + backward pass on the training set → train loss.
-        2. Val loss pass (model in train() mode so loss dict is returned).
-        3. COCO AP evaluation on the validation set.
-        4. (Optional) Prediction images logged to W&B every N epochs.
-        5. Best model saved when val COCO AP improves.
-        6. All metrics logged to W&B and appended to a CSV file.
-
-    Args:
-        exp:  Experiment state (config, device, output paths).
-        data: Data state (loaders + COCO metrics helpers).
-        run:  Run state (model, optimizer, scheduler, history).
-
-    Returns:
-        Updated ``Run`` dataclass with final ``best_map``, ``best_epoch``,
-        and ``history``.
-    """
+    """Run the full training loop and persist the best checkpoint."""
     cfg             = exp.cfg
     device          = exp.device
     best_model_path = exp.best_model_path
     model           = run.model
+    processor       = run.processor
     optimizer       = run.optimizer
     scheduler       = run.scheduler
     history         = run.history
@@ -851,32 +787,42 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_loss_sum = 0.0
 
         for images, targets in data.train_loader:
-            images  = [img.to(device) for img in images]
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            # Format targets for DetrImageProcessor
+            formatted_targets = [
+                {"boxes": t["boxes"], "class_labels": t["labels"]}
+                for t in targets
+            ]
+            
+            # do_rescale=False avoids dividing already [0, 1] tensors by 255
+            batch_dict = processor(images=images, annotations=formatted_targets, return_tensors="pt", do_rescale=False)
+            batch_dict = {k: v.to(device) for k, v in batch_dict.items()}
 
-            loss_dict = model(images, targets)  # forward() returns dict of losses
-            losses    = sum(loss_dict.values())
+            outputs = model(**batch_dict)
+            loss    = outputs.loss
 
             optimizer.zero_grad()
-            losses.backward()
+            loss.backward()
             optimizer.step()
 
-            train_loss_sum += float(losses.item())
+            train_loss_sum += float(loss.item())
 
         train_loss = train_loss_sum / max(1, len(data.train_loader))
 
         # ---- Validation loss pass ----
-        # torchvision detectors only return a loss dict in train() mode, so we
-        # keep the model in train mode but disable gradient computation.
-        model.train()
+        model.eval()  # Keep eval mode for val loss to prevent batchnorm/dropout updates
         val_loss_sum = 0.0
 
         with torch.no_grad():
             for images, targets in data.val_loader:
-                images  = [img.to(device) for img in images]
-                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-                loss_dict = model(images, targets)
-                val_loss_sum += float(sum(loss_dict.values()).item())
+                formatted_targets = [
+                    {"boxes": t["boxes"], "class_labels": t["labels"]}
+                    for t in targets
+                ]
+                batch_dict = processor(images=images, annotations=formatted_targets, return_tensors="pt", do_rescale=False)
+                batch_dict = {k: v.to(device) for k, v in batch_dict.items()}
+                
+                outputs = model(**batch_dict)
+                val_loss_sum += float(outputs.loss.item())
 
         val_loss = val_loss_sum / max(1, len(data.val_loader))
 
@@ -975,7 +921,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune object detection models on KITTI-MOTS.")
+    parser = argparse.ArgumentParser(description="Fine-tune DETR object detection model on KITTI-MOTS.")
 
     # Required
     parser.add_argument("--config",  type=str, required=True, help="Path to YAML config file.")
@@ -1002,7 +948,7 @@ if __name__ == "__main__":
     # Model / training strategy overrides
     parser.add_argument(
         "--freeze_strategy", type=int,
-        help="Backbone freeze level (1–4).  See FasterRCNNModel.prepare_finetune().",
+        help="Backbone freeze level (1–3). Level 1: Backbone, 2: Backbone+Encoder, 3: Backbone+Encoder+Decoder.",
     )
     parser.add_argument(
         "--aug_strategy", type=str,
@@ -1014,7 +960,6 @@ if __name__ == "__main__":
         help="Comma-separated config fields to include in the auto-generated run name "
              "(e.g. 'freeze_strategy,lr').",
     )
-    parser.add_argument("--nms_iou_threshold", type=float, help="Override NMS IoU threshold.")
 
     args = parser.parse_args()
     main(args)
