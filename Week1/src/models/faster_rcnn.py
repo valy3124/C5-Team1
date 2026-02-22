@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import torch
 import numpy as np
 from PIL import Image
+import torchvision
 
 from torchvision.transforms.functional import to_tensor
 from torchvision.models.detection import (
@@ -14,7 +15,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 
 
-class FasterRCNNModel:
+class FasterRCNNModel(torch.nn.Module):
     """
     Wrapper around Torchvision FasterRCNN models.
 
@@ -39,6 +40,7 @@ class FasterRCNNModel:
         device: str = "cuda:0",
         half: bool = False
     ) -> None:
+        super().__init__()
         self.conf = conf
         self.iou = iou
         self.device = device
@@ -59,29 +61,54 @@ class FasterRCNNModel:
                 raise ValueError("half=True requires CUDA.")
             self.model = self.model.half()
 
-    def prepare_finetune(self, num_classes, train_backbone):
-        # Replace box predictor head
+    def prepare_finetune(self, num_classes, freeze_strategy=1):
+        """
+        Prepare the model for fine-tuning by replacing the head and applying freezing strategies.
+        
+        freeze_strategy:
+            1: Freeze Backbone + RPN + ROI Heads (Train ONLY the new Box Predictor)
+            2: Freeze Backbone + RPN. (Train ALL ROI Heads + Box Predictor)
+            3: Freeze Backbone. (Train RPN + ROI Heads + Box Predictor)
+            4: Full Training. (Train EVERYTHING)
+        """
+        # 1. First, freeze EVERYTHING by default for safety
+        for p in self.model.parameters():
+            p.requires_grad = False
+            
+        # 2. Re-initialize the box predictor head (creates new layers with requires_grad=True)
         in_feats = self.model.roi_heads.box_predictor.cls_score.in_features
         self.model.roi_heads.box_predictor = FastRCNNPredictor(in_feats, num_classes)
 
-        # Freeze/unfreeze backbone
-        for p in self.model.backbone.parameters():
-            p.requires_grad = train_backbone
-
-        for p in self.model.roi_heads.box_predictor.parameters():
-            p.requires_grad = True
+        # 3. Apply Unfreezing Strategy
+        if freeze_strategy >= 2:
+            # Unfreeze the rest of the ROI heads (feature extractors in the neck)
+            for p in self.model.roi_heads.parameters():
+                p.requires_grad = True
+                
+        if freeze_strategy >= 3:
+            # Unfreeze the Region Proposal Network (RPN)
+            for p in self.model.rpn.parameters():
+                p.requires_grad = True
+                
+        if freeze_strategy == 4:
+            # Unfreeze the Backbone
+            for p in self.model.backbone.parameters():
+                p.requires_grad = True
 
         self.model.to(self.device)
 
+    def forward(self, images, targets=None):
+        return self.model(images, targets)
+
     @torch.no_grad()
-    def predict(self, images: Union[Image.Image, List[Image.Image]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    def predict(self, images: Union[Image.Image, List[Image.Image], torch.Tensor, List[torch.Tensor]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Run inference on a single image or a list of images
 
         Args
         -----
-        images : PIL.Image.Image or List[PIL.Image.Image]
-            Input RGB image or list of RGB images
+        images : PIL.Image.Image, List[PIL.Image.Image], torch.Tensor, or List[torch.Tensor]
+            Input RGB image(s) or tensor(s)
 
         Returns
         -----
@@ -93,7 +120,7 @@ class FasterRCNNModel:
             }
         """
         single_input = False
-        if isinstance(images, Image.Image):
+        if isinstance(images, (Image.Image, torch.Tensor)):
             images = [images]
             single_input = True
 
@@ -102,7 +129,12 @@ class FasterRCNNModel:
         self.model.eval()
 
         try:
-            tensors = [to_tensor(img).to(self.device) for img in images]
+            tensors = []
+            for img in images:
+                if isinstance(img, torch.Tensor):
+                    tensors.append(img.to(self.device))
+                else:
+                    tensors.append(to_tensor(img).to(self.device))
 
             if self.half:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
@@ -114,7 +146,6 @@ class FasterRCNNModel:
             if was_training:
                 self.model.train()
 
-        # The mapping done in dataset.py is already aligned with faster_rcnn model
         outputs = []
         for result in results:
             outputs.append({

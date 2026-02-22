@@ -14,15 +14,17 @@ model:
   weights: "fasterrcnn_mobilenet_v3_large_fpn" # or yolov8n.pt for YOLO
 
 training:
-  epochs: 100
+  epochs: 10
   batch_size: 32
   val_batch_size: 32
   lr: 0.00005 # 0.0001
-  train_backbone: false
-  augment: true
+  freeze_strategy: 1
+  aug_strategy: "legacy"
+  name_fields: "freeze_strategy,lr"
+  nms_iou_threshold: 0.5
   scheduler: 
     name: cosine
-    t_max: 100
+    t_max: 10
 
 
 debug: false

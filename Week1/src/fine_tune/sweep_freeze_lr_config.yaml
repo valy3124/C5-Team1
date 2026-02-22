@@ -5,10 +5,16 @@ metric:
   name: val_coco_ap
   goal: maximize
 parameters:
-  augment:
-    values: [true, false]
-  train_backbone:
-    values: [true, false]
+  epochs:
+    value: 10
+  aug_strategy:
+    value: "legacy"
+  name_fields:
+    value: "freeze_strategy,lr"
+  freeze_strategy:
+    values: [1, 2, 3, 4]
+  lr:
+    values: [0.0001, 0.00005, 0.00001]
 command:
   - ${env}
   - ${interpreter}
