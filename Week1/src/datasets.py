@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Union, Literal, Any, Optional
 
 import numpy as np
+import random
 import PIL.Image as Image
 import pycocotools.mask as rletools
+import xml.etree.ElementTree as ET
 
 
 
@@ -111,7 +113,6 @@ class KITTIMOTS:
         val_seqs_official = sorted(list(self.VALIDATION_SEQS)) # Official validation
 
         # Deterministic shuffle for splitting official train into train/dev
-        import random
         rng = random.Random(self.seed)
         shuffled_train = sorted(train_seqs_official) # Sort first to ensure deterministic start
         rng.shuffle(shuffled_train)
@@ -240,13 +241,127 @@ class KITTIMOTS:
         return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
 
-class DEArt:
+class DEART:
     """
-    DEArt dataset wrapper.
+    DEArt dataset wrapper using PASCAL VOC XML format.
 
     __getitem__ returns:
       (PIL.Image RGB, list[InstanceAnn])
     """
+    
+    # They are mapped to COCO Class 1 (Person)
+    LABELS_MAPPING = {
+        "angel": 1,
+        "centaur": 1,     
+        "crucifixion": 1,      
+        "devil": 1,
+        "god the father": 1,   
+        "judith": 1,          
+        "knight": 1,          
+        "monk": 1,            
+        "nude": 1,             
+        "person": 1, # The standard human class
+        "shepherd": 1,
+    }
+
+    def __init__(
+        self,
+        root: Union[str, Path] = "~/mcv/datasets/C5/DEART/",
+        split: Literal["train", "dev", "validation", "train_full"] = "train",
+        ann_source: str = "xml", 
+        seed: int = 42,
+        split_ratio: float = 0.8,
+    ):
+        self.root = Path(root).expanduser()
+        self.split = split
+        self.seed = seed
+        self.split_ratio = split_ratio
+
+        self.img_root = self.root / "images" 
+        self.ann_root = self.root / "annotations" / "annots_pub"
+
+        if not self.ann_root.exists():
+            raise FileNotFoundError(f"DEART Annotations folder not found: {self.ann_root}")
+
+        # Take all image IDs from the XML file names
+        all_image_ids = sorted([p.stem for p in self.ann_root.glob("*.xml")])
+
+        rng = random.Random(self.seed)
+        rng.shuffle(all_image_ids)
+
+        n_train = int(len(all_image_ids) * self.split_ratio)
+        sub_train_ids = set(all_image_ids[:n_train])
+        sub_dev_ids = set(all_image_ids[n_train:])
+
+        if self.split == "train":
+            self.target_ids = list(sub_train_ids)
+        elif self.split in ["dev", "validation"]:
+            self.target_ids = list(sub_dev_ids)
+        elif self.split == "train_full":
+            self.target_ids = all_image_ids
+        else:
+            raise ValueError(f"Unknown split: {self.split}")
+
+    def __len__(self) -> int:
+        return len(self.target_ids)
+
+    def __getitem__(self, i: int) -> Tuple[Image.Image, List[InstanceAnn]]:
+        img_id = self.target_ids[i]
+        img_path = self.img_root / f"{img_id}.jpg"
+        if not img_path.exists():
+            img_path = self.img_root / f"{img_id}.png" # Fallback if they are pngs
+            
+        image = Image.open(img_path).convert("RGB")
+        width, height = image.size
+
+        # Parse the XML annotation
+        xml_path = self.ann_root / f"{img_id}.xml"
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+
+        out_anns = []
+        obj_counter = 1 # Dummy ID since VOC doesn't use tracking IDs
+
+        for obj in root.findall("object"):
+            class_name = obj.find("name").text
+            
+            # if it's not a human ignore it
+            if class_name not in self.LABELS_MAPPING:
+                continue
+
+            # Extract bounding box
+            bndbox = obj.find("bndbox")
+            xmin = float(bndbox.find("xmin").text)
+            ymin = float(bndbox.find("ymin").text)
+            xmax = float(bndbox.find("xmax").text)
+            ymax = float(bndbox.find("ymax").text)
+
+            bbox_xyxy = (int(xmin), int(ymin), int(xmax), int(ymax))
+            
+            # Dummy RLE for bbox tracking
+            rle = {"size": [height, width], "counts": b""}
+
+            out_anns.append(
+                InstanceAnn(
+                    object_id=obj_counter,
+                    class_id=self.LABELS_MAPPING[class_name],
+                    instance_id=obj_counter,
+                    mask_rle=rle,
+                    bbox_xyxy=bbox_xyxy,
+                )
+            )
+            obj_counter += 1
+
+        # COCO evaluator requires integer image IDs so "00000028" -> 28
+        safe_img_id = int(img_id) if img_id.isdigit() else i
+
+        meta = {
+            "image_id": safe_img_id,
+            "image_path": str(img_path),
+            "index": i,
+        }
+
+        return image, out_anns, meta
     
 # TODO: IMPLEMENT THE DEART DATASET READER + SPLIT WITH FIXED SEED + UTILS AS IN KITTI-MOTS
 

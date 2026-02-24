@@ -1,0 +1,28 @@
+project: "Fine-tune DETR KITTI-MOTS"
+experiment_name: "detr_baseline"
+output_dir: "results"
+
+data:
+  root: "/export/home/acs/stud/v/valentin.micu/C5/C5-Team1/dataset/"
+  num_workers: 4
+  mode: "search"       # Options: search (train on "train", validate on "dev"), full (train on "train_full", validate on "validation")
+  split_ratio: 0.8     # For search mode
+  seed: 42             # For deterministic splitting
+
+model:
+  name: "detr" # Options: faster_rcnn, yolo, detr
+  weights: "facebook/detr-resnet-50" 
+
+training:
+  epochs: 10
+  batch_size: 8        # Note: DETR usually requires smaller batch sizes than Faster R-CNN due to memory
+  val_batch_size: 8
+  lr: 0.0001 
+  freeze_strategy: 3   # 1: Freeze backbone. 2: Freeze backbone + encoder. 3: Freeze everything except heads
+  aug_strategy: "legacy"
+  name_fields: "freeze_strategy,lr"
+  scheduler: 
+    name: cosine
+    t_max: 10
+
+debug: false

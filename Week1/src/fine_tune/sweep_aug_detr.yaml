@@ -1,5 +1,5 @@
-program: src/fine_tune/fine_tune.py
-project: "Fine-tune Faster R-CNN KITTI-MOTS"
+program: src/fine_tune/fine_tune_detr.py
+project: "Fine-tune DETR KITTI-MOTS"
 method: grid
 metric:
   name: val_coco_ap
@@ -11,20 +11,20 @@ parameters:
     
   # Fixed parameters (found from the previous architecture sweep)
   freeze_strategy:
-    value: 2          # Level 2 (ROI Heads + Box Predictor)
+    value: 3         
   lr:
-    value: 0.0001     # 1e-4
+    value: 0.0001   
   name_fields:
     value: "aug_strategy"
   epochs:
-    value: 30
+    value: 15
   t_max:
-    value: 30
+    value: 20
 
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - "--config"
-  - "src/fine_tune/config_example.yaml"
+  - "src/fine_tune/config_detr.yaml"
   - ${args}

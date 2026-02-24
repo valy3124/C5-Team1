@@ -1,0 +1,32 @@
+program: src/fine_tune/fine_tune_detr.py
+project: "Fine-tune DETR KITTI-MOTS"
+method: bayes
+metric:
+  name: val_coco_ap
+  goal: maximize
+parameters:
+  epochs:
+    value: 25
+  aug_strategy:
+    value: "legacy" # modify for the best performing model
+  freeze_strategy:
+    value: 2 # modify for the best performing model
+  lr:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.0005
+  optimizer:
+    values: ["adam", "adamw", "sgd"]
+  scheduler:
+    values: ["none", "step", "cosine"]
+  gradient_clipping:
+    distribution: uniform
+    min: 0.1
+    max: 1.0
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "src/fine_tune/config_detr.yaml"
+  - ${args}
