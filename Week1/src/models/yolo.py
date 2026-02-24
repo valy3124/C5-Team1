@@ -28,6 +28,9 @@ class UltralyticsYOLO:
         Device string ("0" for gpu)
     half : bool
         Whether to use FP16 inference
+    map_coco : bool
+        Whether to apply hardcoded class remapping to standard COCO-90 IDs
+        Disable this for fine-tuning on custom datasets.
     """
 
     def __init__(
@@ -37,11 +40,13 @@ class UltralyticsYOLO:
         iou: float = 0.7,
         device: str = "0",
         half: bool = False,
+        map_coco: bool = True,
     ) -> None:
         self.conf = conf
         self.iou = iou
         self.device = device
         self.half = half
+        self.map_coco = map_coco
 
         # Default model: YOLOv8 small pretrained on COCO
         if weights is None:
@@ -77,7 +82,7 @@ class UltralyticsYOLO:
         # It internally switches to eval mode.
         results = self.model.predict(
             source=images,
-            imgsz=max(max(img.size) for img in images),
+            imgsz=640,
             conf=self.conf,
             iou=self.iou,
             device=self.device,
@@ -102,7 +107,8 @@ class UltralyticsYOLO:
             classes = result.boxes.cls.detach().cpu().numpy().astype(np.int64)
 
             # YOLO to standard COCO-90 Mapping (0=Person, 2=Car => 1=Person, 3=Car). Other classes are mapped to 0 (N/A)
-            classes = np.where((classes == 0) | (classes == 2), classes + 1, 0)
+            if self.map_coco:
+                classes = np.where((classes == 0) | (classes == 2), classes + 1, 0)
 
             outputs.append({
                 "bboxes_xyxy": bboxes,

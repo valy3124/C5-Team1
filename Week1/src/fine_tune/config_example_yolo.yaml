@@ -1,0 +1,24 @@
+project: "kitti-mots-yolo"
+output_dir: "results"
+experiment_name: "full_ft"
+
+data:
+  root: "~/mcv/datasets/C5/KITTI-MOTS/"
+  mode: "search"
+  seed: 42
+  split_ratio: 0.8
+
+model:
+  name: "yolo"
+  weights: "yolov10b.pt"
+
+training:
+  epochs: 40
+  imgsz: 640
+  batch_size: 16
+  lr: 0.0001
+  conf: 0
+  nms_iou_threshold: 0.5
+  freeze_strategy: 1
+  aug_strategy: "base"
+  log_images_every: 5
