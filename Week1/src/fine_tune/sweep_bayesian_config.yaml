@@ -1,0 +1,32 @@
+program: src/fine_tune/fine_tune.py
+project: "Fine-tune Faster R-CNN KITTI-MOTS"
+method: bayes
+metric:
+  name: val_coco_ap
+  goal: maximize
+parameters:
+  epochs:
+    value: 25
+  aug_strategy:
+    value: "base"
+  freeze_strategy:
+    value: 2
+  lr:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
+  optimizer:
+    values: ["adam", "adamw", "sgd"]
+  scheduler:
+    values: ["none", "step", "cosine"]
+  gradient_clipping:
+    distribution: uniform
+    min: 0.1
+    max: 10.0
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "src/fine_tune/config_example.yaml"
+  - ${args}

@@ -67,7 +67,17 @@ def setup_model(exp: Exp, data: Data) -> Run:
 
     # Only pass parameters that require gradients to the optimizer
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.AdamW(trainable_params, lr=cfg["training"]["lr"])
+    
+    opt_name = cfg["training"].get("optimizer", "adamw").lower()
+    if opt_name == "adamw":
+        optimizer = optim.AdamW(trainable_params, lr=cfg["training"]["lr"])
+    elif opt_name == "adam":
+        optimizer = optim.Adam(trainable_params, lr=cfg["training"]["lr"])
+    elif opt_name == "sgd":
+        optimizer = optim.SGD(trainable_params, lr=cfg["training"]["lr"], momentum=0.9)
+    else:
+        raise ValueError(f"Unknown optimizer '{opt_name}'")
+        
     scheduler = build_scheduler(optimizer, cfg)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -201,7 +211,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         run.model.train()
         train_loss_sum = 0.0
 
-        for images, targets in tqdm(data.train_loader, desc=f"Train Epoch {epoch + 1}/{num_epochs}", leave=False):
+        for images, targets in data.train_loader:
             images  = [img.to(exp.device) for img in images]
             targets = [{k: v.to(exp.device) for k, v in t.items()} for t in targets]
 
@@ -211,6 +221,11 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
             run.optimizer.zero_grad()
             losses.backward()
+            
+            grad_clip = exp.cfg["training"].get("gradient_clipping")
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(run.model.parameters(), grad_clip)
+                
             run.optimizer.step()
 
             train_loss_sum += float(losses.item())

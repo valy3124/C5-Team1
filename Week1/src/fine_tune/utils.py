@@ -98,6 +98,9 @@ def get_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--aug_strategy", type=str, help="Augmentation strategy name.")
     parser.add_argument("--name_fields", type=str, help="Fields for auto-generated run name.")
     parser.add_argument("--nms_iou_threshold", type=float, help="Override NMS IoU threshold (Faster R-CNN).")
+    parser.add_argument("--optimizer", type=str, help="Override optimizer.")
+    parser.add_argument("--scheduler", type=str, help="Override scheduler name.")
+    parser.add_argument("--gradient_clipping", type=float, help="Override gradient clipping max norm.")
     return parser
 
 # ===========================================================================
@@ -118,6 +121,9 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
     if getattr(args, "freeze_strategy", None) is not None: training["freeze_strategy"]  = int(args.freeze_strategy)
     if getattr(args, "aug_strategy", None) is not None: training["aug_strategy"]     = str(args.aug_strategy)
     if getattr(args, "nms_iou_threshold", None) is not None: training["nms_iou_threshold"] = float(args.nms_iou_threshold)
+    if getattr(args, "optimizer", None) is not None: training["optimizer"] = str(args.optimizer)
+    if getattr(args, "scheduler", None) is not None: training.setdefault("scheduler", {})["name"] = str(args.scheduler)
+    if getattr(args, "gradient_clipping", None) is not None: training["gradient_clipping"] = float(args.gradient_clipping)
 
     cfg.setdefault("data", {})
     cfg["data"]["mode"]        = args.mode        or cfg["data"].get("mode", "full")
@@ -138,6 +144,15 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
             
         if "weight_decay" in training:
             parts.append(f"WD{training['weight_decay']:.1e}")
+            
+        if "optimizer" in training:
+            parts.append(f"Opt_{training['optimizer']}")
+            
+        if "scheduler" in training and training["scheduler"].get("name", "none") != "none":
+            parts.append(f"Sch_{training['scheduler']['name']}")
+            
+        if "gradient_clipping" in training:
+            parts.append(f"GC_{training['gradient_clipping']:.1f}")
 
         cfg["experiment_name"] = "_".join(parts)
         print(f"Auto-generated experiment name: {cfg['experiment_name']}")
