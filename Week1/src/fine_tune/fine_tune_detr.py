@@ -80,7 +80,17 @@ def setup_model(exp: Exp, data: Data) -> Run:
     model.to(device)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.AdamW(trainable_params, lr=cfg["training"]["lr"])
+    
+    opt_name = cfg["training"].get("optimizer", "adamw").lower()
+    if opt_name == "adamw":
+        optimizer = optim.AdamW(trainable_params, lr=cfg["training"]["lr"])
+    elif opt_name == "adam":
+        optimizer = optim.Adam(trainable_params, lr=cfg["training"]["lr"])
+    elif opt_name == "sgd":
+        optimizer = optim.SGD(trainable_params, lr=cfg["training"]["lr"], momentum=0.9)
+    else:
+        raise ValueError(f"Unknown optimizer '{opt_name}'")
+        
     scheduler = build_scheduler(optimizer, cfg)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -242,7 +252,10 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             
             run.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(run.model.parameters(), max_norm=0.1) # Prevents exploding gradients
+            
+            grad_clip = exp.cfg["training"].get("gradient_clipping", 0.1)
+            torch.nn.utils.clip_grad_norm_(run.model.parameters(), max_norm=grad_clip) 
+            
             run.optimizer.step()
             
             train_loss_sum += float(loss.item())
