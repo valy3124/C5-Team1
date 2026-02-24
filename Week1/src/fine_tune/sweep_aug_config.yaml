@@ -13,7 +13,7 @@ parameters:
   freeze_strategy:
     value: 2          # Level 2 (ROI Heads + Box Predictor)
   lr:
-    value: 0.00005     # 5e-5
+    value: 0.0001     # 1e-4
   name_fields:
     value: "aug_strategy"
   epochs:

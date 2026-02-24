@@ -638,7 +638,7 @@ def setup_model(exp: Exp, data: Data) -> Run:
             "Use fine_tune_detr.py for DETR or fine_tune_yolo.py for YOLO."
         )
 
-    history = {"train_loss": [], "train_map": [], "val_loss": [], "val_map": []}
+    history = {"train_loss": [], "train_map": [], "val_map": []}
     return Run(model, optimizer, history, scheduler, best_map=0.0, best_epoch=0)
 
 
@@ -865,28 +865,12 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         train_loss = train_loss_sum / max(1, len(data.train_loader))
 
-        # ---- Validation loss pass ----
-        # torchvision detectors only return a loss dict in train() mode, so we
-        # keep the model in train mode but disable gradient computation.
-        model.train()
-        val_loss_sum = 0.0
-
-        with torch.no_grad():
-            for images, targets in data.val_loader:
-                images  = [img.to(device) for img in images]
-                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-                loss_dict = model(images, targets)
-                val_loss_sum += float(sum(loss_dict.values()).item())
-
-        val_loss = val_loss_sum / max(1, len(data.val_loader))
-
         # ---- COCO evaluation (switch to eval() mode internally) ----
         eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics)
         val_map     = eval_result.metrics["overall/AP"]
 
         # ---- Append to history ----
         history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
         history["val_map"].append(val_map)
 
         # ---- Optional prediction image logging ----
@@ -896,7 +880,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         print(
             f"Epoch {epoch + 1}/{num_epochs}  |  "
-            f"train_loss: {train_loss:.4f}  val_loss: {val_loss:.4f}  "
+            f"train_loss: {train_loss:.4f}  "
             f"val_COCO_AP: {val_map:.4f}"
         )
 
@@ -922,7 +906,6 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         wandb_log = {
             "epoch":       epoch + 1,
             "train_loss":  train_loss,
-            "val_loss":    val_loss,
             "val_coco_ap": val_map,
             "best_map":    best_map,
             "best_epoch":  best_epoch,
@@ -933,7 +916,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         # ---- CSV logging ----
         csv_path = os.path.join(exp.output_dir, "metrics_history.csv")
         write_header = not os.path.isfile(csv_path)
-        headers = ["epoch", "train_loss", "val_loss", "best_map"] + [
+        headers = ["epoch", "train_loss", "best_map"] + [
             f"val_{k}" for k in eval_result.metrics.keys()
         ]
 
@@ -941,7 +924,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             if write_header:
                 fh.write(",".join(headers) + "\n")
             row = (
-                [str(epoch + 1), f"{train_loss:.6f}", f"{val_loss:.6f}", f"{best_map:.6f}"]
+                [str(epoch + 1), f"{train_loss:.6f}", f"{best_map:.6f}"]
                 + [f"{v:.6f}" for v in eval_result.metrics.values()]
             )
             fh.write(",".join(row) + "\n")
