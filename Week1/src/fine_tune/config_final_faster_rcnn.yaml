@@ -1,0 +1,27 @@
+data:
+  mode: full
+  num_workers: 4
+  root: ~/mcv/datasets/C5/KITTI-MOTS/
+  seed: 42
+  split_ratio: 0.8
+debug: false
+experiment_name: faster_rcnn_final
+model:
+  name: faster_rcnn
+  weights: fasterrcnn_mobilenet_v3_large_fpn
+output_dir: results
+project: Fine-tune Faster R-CNN KITTI-MOTS
+training:
+  aug_strategy: base
+  batch_size: 32
+  epochs: 25
+  freeze_strategy: 2
+  gradient_clipping: 0.77
+  lr: 4.26e-05
+  name_fields: freeze_strategy,lr
+  nms_iou_threshold: 0.5
+  optimizer: adamw
+  scheduler:
+    name: cosine
+    t_max: 25
+  val_batch_size: 32
