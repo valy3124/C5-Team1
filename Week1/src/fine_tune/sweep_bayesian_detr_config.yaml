@@ -8,9 +8,9 @@ parameters:
   epochs:
     value: 25
   aug_strategy:
-    value: "legacy" # modify for the best performing model
+    value: "base" 
   freeze_strategy:
-    value: 2 # modify for the best performing model
+    value: 3 
   lr:
     distribution: log_uniform_values
     min: 0.00001
