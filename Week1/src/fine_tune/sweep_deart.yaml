@@ -1,0 +1,25 @@
+program: src/fine_tune/fine_tune_detr.py
+project: "C5-Domain-Shift"
+method: grid
+metric:
+  name: val_overall/AP
+  goal: maximize
+parameters:
+  epochs:
+    value: 10
+  aug_strategy:
+    value: "base"
+  name_fields:
+    value: "freeze_strategy,lr"
+  freeze_strategy:
+    values: [3]
+  lr:
+    values: [0.00005, 0.00001]
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "src/fine_tune/config_detr_deart.yaml"
+  - ${args}
+

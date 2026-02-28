@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from torch.utils.data import DataLoader
 from torchvision.transforms.functional import to_tensor
+from typing import Dict
+from pycocotools.cocoeval import COCOeval
+from pycocotools.coco import COCO
 
 # ---------------------------------------------------------------------------
 # Path bootstrap
@@ -51,6 +54,7 @@ class Data:
     val_loader:         Any
     train_coco_metrics: Any = None
     val_coco_metrics:   Any = None
+    label_mapping:      Dict[int, int] = None
 
 @dataclass
 class Run:
@@ -183,7 +187,7 @@ def build_scheduler(optimizer, cfg: Dict[str, Any]) -> Optional[Any]:
 
 
 # ===========================================================================
-# Dataset Adapters
+# Dataset Adapters & Evaluator 
 # ===========================================================================
 class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
     def __init__(self, base_ds: torch.utils.data.Dataset) -> None:
@@ -225,6 +229,131 @@ class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
             "image_id": torch.tensor([image_id], dtype=torch.int64),
             "area":     area.to(torch.float32),
             "iscrowd":  torch.zeros((labels_t.shape[0],), dtype=torch.int64),
+        }
+
+class BaseToTorchvision(torch.utils.data.Dataset):
+    """Adapter that turns Python objects from datasets.py into PyTorch Tensors."""
+    def __init__(self, base_ds: torch.utils.data.Dataset, label_remap: Dict[int, int] = None):
+        self.base_ds = base_ds
+        self.label_remap = label_remap or {}
+
+    def __len__(self) -> int: return len(self.base_ds)
+
+    def get_annotation_only(self, idx: int):
+        """Return (image_id, width, height, boxes_t, labels_t) WITHOUT loading the image.
+        Uses base_ds.get_meta() if available (e.g. DEART), otherwise falls back to __getitem__."""
+        if hasattr(self.base_ds, 'get_meta'):
+            image_id, width, height, raw_anns = self.base_ds.get_meta(idx)
+            boxes, labels = [], []
+            for ann in raw_anns:
+                cls = int(getattr(ann, 'class_id', -1))
+                if cls in self.label_remap:
+                    cls = self.label_remap[cls]
+                box = getattr(ann, 'bbox_xyxy', None)
+                if box is None: continue
+                x1, y1, x2, y2 = map(float, box)
+                if x2 <= x1 or y2 <= y1: continue
+                boxes.append([x1, y1, x2, y2])
+                labels.append(cls)
+            boxes_t  = torch.tensor(boxes,  dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32)
+            labels_t = torch.tensor(labels, dtype=torch.int64)   if labels else torch.zeros((0,),   dtype=torch.int64)
+            return image_id, width, height, boxes_t, labels_t
+        else:
+            # Fallback: load the image (slow but safe for KITTI which is small)
+            img_np, target = self[idx]
+            h, w = img_np.shape[0], img_np.shape[1]
+            return int(target['image_id'].item()), w, h, target['boxes'], target['labels']
+
+    def __getitem__(self, idx: int):
+        img_pil, raw_anns, meta = self.base_ds[idx]
+        img_np = np.array(img_pil)
+        
+        boxes, labels = [], []
+        for ann in raw_anns:
+            cls = int(getattr(ann, "class_id", -1))
+            if cls in self.label_remap: 
+                cls = self.label_remap[cls] # Trick the model!
+                
+            box = getattr(ann, "bbox_xyxy", None)
+            if box is None: continue
+            x1, y1, x2, y2 = map(float, box)
+            
+            # PyTorch expects valid box dimensions
+            if x2 <= x1 or y2 <= y1: continue
+            
+            boxes.append([x1, y1, x2, y2])
+            labels.append(cls)
+
+        if boxes:
+            boxes_t  = torch.tensor(boxes,  dtype=torch.float32)
+            labels_t = torch.tensor(labels, dtype=torch.int64)
+        else:
+            boxes_t  = torch.zeros((0, 4), dtype=torch.float32)
+            labels_t = torch.zeros((0,),   dtype=torch.int64)
+
+        # Calculate area for COCO evaluation
+        area = ((boxes_t[:, 2] - boxes_t[:, 0]).clamp(min=0) * (boxes_t[:, 3] - boxes_t[:, 1]).clamp(min=0)) if boxes_t.numel() else torch.zeros((0,), dtype=torch.float32)
+        
+        target = {
+            "boxes": boxes_t, "labels": labels_t,
+            "image_id": torch.tensor([meta.get("image_id", idx)], dtype=torch.int64),
+            "area": area.to(torch.float32),
+            "iscrowd": torch.zeros((labels_t.shape[0],), dtype=torch.int64),
+            "orig_size": torch.tensor([img_np.shape[0], img_np.shape[1]], dtype=torch.int64),
+        }
+        return img_np, target
+
+class MemoryMetrics:
+    """Builds COCO Ground Truth directly from annotations — skips image loading for speed."""
+    def __init__(self, torchvision_dataset, label_mapping):
+        
+        self.coco_gt = COCO()
+        dataset_dict = {"images": [], "annotations": [], "categories": []}
+        
+        for cid in set(label_mapping.values()):
+            dataset_dict["categories"].append({"id": cid, "name": f"Class_{cid}"})
+
+        # Unwrap ApplyAlbumentations to get the BaseToTorchvision underneath
+        base_tv = getattr(torchvision_dataset, 'ds', torchvision_dataset)
+
+        ann_id = 1
+        print(f"Building COCO GT index for {len(base_tv)} samples (annotations only)...")
+        for idx in range(len(base_tv)):
+            if hasattr(base_tv, 'get_annotation_only'):
+                img_id, w, h, boxes, labels = base_tv.get_annotation_only(idx)
+            else:
+                # Fallback: full image load (slow)
+                img, target = torchvision_dataset[idx]
+                img_id = int(target["image_id"].item())
+                h, w = img.shape[0], img.shape[1]
+                boxes, labels = target["boxes"], target["labels"]
+
+            dataset_dict["images"].append({"id": img_id, "width": w, "height": h, "file_name": str(img_id)})
+            
+            for box, label in zip(boxes, labels):
+                cat_id = int(label.item()) if hasattr(label, 'item') else int(label)
+                if cat_id not in label_mapping: continue
+                x1, y1, x2, y2 = box.tolist() if hasattr(box, 'tolist') else list(box)
+                dataset_dict["annotations"].append({
+                    "id": ann_id, "image_id": img_id, "category_id": label_mapping[cat_id],
+                    "bbox": [x1, y1, x2-x1, y2-y1], "area": (x2-x1)*(y2-y1), "iscrowd": 0
+                })
+                ann_id += 1
+                
+        self.coco_gt.dataset = dataset_dict
+        self.coco_gt.createIndex()
+        print("COCO GT index built.")
+
+    def compute_metrics(self, coco_dt):
+        
+        coco_eval = COCOeval(self.coco_gt, coco_dt, 'bbox')
+        coco_eval.evaluate()
+        coco_eval.accumulate()
+        coco_eval.summarize()
+        s = coco_eval.stats
+        return {
+            "overall/AP": s[0], "overall/AP50": s[1], "overall/AP75": s[2], 
+            "overall/AP-small": s[3], "overall/AP-medium": s[4], "overall/AP-large": s[5]
         }
 
 class ApplyAlbumentations(torch.utils.data.Dataset):
@@ -272,11 +401,15 @@ class ApplyAlbumentations(torch.utils.data.Dataset):
 # ===========================================================================
 def get_transforms(is_train: bool = True, aug_strategy: str = "base") -> A.Compose:
     bbox_params = A.BboxParams(format="pascal_voc", label_fields=["class_labels"], clip=True, min_area=1, min_visibility=0.1)
+    
+    tfms = [A.LongestMaxSize(max_size=800, p=1.0)] 
+
     if not is_train:
-        return A.Compose([ToTensorV2()], bbox_params=A.BboxParams(format="pascal_voc", label_fields=["class_labels"], clip=True))
+        tfms.append(ToTensorV2())
+        return A.Compose(tfms, bbox_params=bbox_params)
 
     if aug_strategy == "legacy":
-        tfms = [
+        tfms += [
             A.HorizontalFlip(p=0.5),
             A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.10, rotate_limit=10, border_mode=0, p=0.5),
             A.OneOf([
@@ -290,7 +423,7 @@ def get_transforms(is_train: bool = True, aug_strategy: str = "base") -> A.Compo
             A.MotionBlur(p=0.2),
         ]
     else:
-        tfms = [A.HorizontalFlip(p=0.5)]
+        tfms += [A.HorizontalFlip(p=0.5)]
         if aug_strategy in ("geometric", "limit_test"):
             tfms += [A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.10, rotate_limit=15, border_mode=0, p=0.5), A.Perspective(scale=(0.05, 0.1), p=0.3)]
         if aug_strategy in ("color_jitter", "limit_test"):
@@ -311,26 +444,38 @@ def setup_data(exp: Exp) -> Data:
     seed = cfg["data"].get("seed", 42)
     split_ratio = cfg["data"].get("split_ratio", 0.8)
     aug_strategy = cfg["training"].get("aug_strategy", "legacy")
+    dataset_name = cfg["data"].get("dataset", "kitti_mots")
 
     if mode == "full": train_split, val_split = "train_full", "validation"
     elif mode == "search": train_split, val_split = "train", "dev"
     else: raise ValueError(f"Unknown data.mode '{mode}'.")
+    
+    #Dataset selection
+    if dataset_name == "kitti_mots":
+        base_train = datasets.KITTIMOTS(root, split=train_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
+        base_val   = datasets.KITTIMOTS(root, split=val_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
+        classes    = ["Background", "Car", "Pedestrian"]
+        label_remap = {} 
+        model_to_coco_mapping = {1: 3, 2: 1} # Model Car(1)->COCO(3), Ped(2)->COCO(1)
+        
+    elif dataset_name == "deart":
+        base_train = datasets.DEART(root, split=train_split, ann_source="xml", seed=seed, split_ratio=split_ratio)
+        base_val   = datasets.DEART(root, split=val_split, ann_source="xml", seed=seed, split_ratio=split_ratio)
+        classes    = ["Background", "Car", "Pedestrian"] # Keep same classes to load KITTI weights
+        label_remap = {1: 2} # Trick DEART Human (1) into DETR Pedestrian (2)
+        model_to_coco_mapping = {2: 1} # Evaluate DETR Pedestrian (2) as COCO Person (1)
+    else:
+        raise ValueError(f"Unknown dataset '{dataset_name}'")
 
-    train_ds = ApplyAlbumentations(
-        ds=KITTIMOTSToTorchvision(datasets.KITTIMOTS(root, split=train_split, ann_source="txt", seed=seed, split_ratio=split_ratio)),
-        tf=get_transforms(is_train=True, aug_strategy=aug_strategy),
-    )
-    val_ds = ApplyAlbumentations(
-        ds=KITTIMOTSToTorchvision(datasets.KITTIMOTS(root, split=val_split, seed=seed, split_ratio=split_ratio)),
-        tf=get_transforms(is_train=False),
-    )
+    train_ds = ApplyAlbumentations(ds=BaseToTorchvision(base_train, label_remap=label_remap), tf=get_transforms(is_train=True, aug_strategy=aug_strategy))
+    val_ds = ApplyAlbumentations(ds=BaseToTorchvision(base_val, label_remap=label_remap), tf=get_transforms(is_train=False))
 
     num_workers = cfg["data"].get("num_workers", 4)
     train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=cfg["training"].get("val_batch_size", 4), shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
-    classes = ["Background", "Car", "Pedestrian"]
-    train_coco_metrics = CocoMetrics(root=root, split=train_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
-    val_coco_metrics   = CocoMetrics(root=root, split=val_split,   ann_source="txt", seed=seed, split_ratio=split_ratio)
+    # classes = ["Background", "Car", "Pedestrian"]
+    train_coco_metrics = MemoryMetrics(train_ds, model_to_coco_mapping)
+    val_coco_metrics   = MemoryMetrics(val_ds, model_to_coco_mapping)
 
-    return Data(classes, train_loader, val_loader, train_coco_metrics, val_coco_metrics)
+    return Data(classes, train_loader, val_loader, train_coco_metrics, val_coco_metrics, model_to_coco_mapping)

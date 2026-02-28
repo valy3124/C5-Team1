@@ -283,8 +283,22 @@ class DEART:
         if not self.ann_root.exists():
             raise FileNotFoundError(f"DEART Annotations folder not found: {self.ann_root}")
 
-        # Take all image IDs from the XML file names
-        all_image_ids = sorted([p.stem for p in self.ann_root.glob("*.xml")])
+        #Keep only the image IDs that have both XML and Image files to avoid broken pairs
+        xml_stems = {p.stem for p in self.ann_root.glob("*.xml")}
+        
+        valid_extensions = {".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"}
+        # Build a dictionary mapping: image_id -> exact_file_path
+        img_dict = {p.stem: p for p in self.img_root.iterdir() if p.suffix in valid_extensions}
+        
+        valid_ids = sorted(list(xml_stems.intersection(img_dict.keys())))
+        
+        print(f"Found {len(xml_stems)} XMLs and {len(img_dict)} Images.")
+        print(f"Keeping {len(valid_ids)} valid pairs. Skipped {len(xml_stems) - len(valid_ids)} missing images.")
+
+        # Save the exact paths to a class variable so we never have to search again!
+        self.img_paths_dict = {vid: img_dict[vid] for vid in valid_ids}
+
+        all_image_ids = valid_ids
 
         rng = random.Random(self.seed)
         rng.shuffle(all_image_ids)
@@ -307,29 +321,28 @@ class DEART:
 
     def __getitem__(self, i: int) -> Tuple[Image.Image, List[InstanceAnn]]:
         img_id = self.target_ids[i]
-        img_path = self.img_root / f"{img_id}.jpg"
-        if not img_path.exists():
-            img_path = self.img_root / f"{img_id}.png" # Fallback if they are pngs
-            
+        
+        # O(1) Instant lookup! No more searching the hard drive.
+        img_path = self.img_paths_dict[img_id]
+        
+        # 2. Open the image
         image = Image.open(img_path).convert("RGB")
         width, height = image.size
 
-        # Parse the XML annotation
+        # 3. Parse the XML annotation
         xml_path = self.ann_root / f"{img_id}.xml"
         tree = ET.parse(xml_path)
         root = tree.getroot()
 
         out_anns = []
-        obj_counter = 1 # Dummy ID since VOC doesn't use tracking IDs
+        obj_counter = 1
 
         for obj in root.findall("object"):
             class_name = obj.find("name").text
             
-            # if it's not a human ignore it
             if class_name not in self.LABELS_MAPPING:
                 continue
 
-            # Extract bounding box
             bndbox = obj.find("bndbox")
             xmin = float(bndbox.find("xmin").text)
             ymin = float(bndbox.find("ymin").text)
@@ -337,8 +350,6 @@ class DEART:
             ymax = float(bndbox.find("ymax").text)
 
             bbox_xyxy = (int(xmin), int(ymin), int(xmax), int(ymax))
-            
-            # Dummy RLE for bbox tracking
             rle = {"size": [height, width], "counts": b""}
 
             out_anns.append(
@@ -352,9 +363,7 @@ class DEART:
             )
             obj_counter += 1
 
-        # COCO evaluator requires integer image IDs so "00000028" -> 28
         safe_img_id = int(img_id) if img_id.isdigit() else i
-
         meta = {
             "image_id": safe_img_id,
             "image_path": str(img_path),
@@ -362,6 +371,47 @@ class DEART:
         }
 
         return image, out_anns, meta
+
+    def get_meta(self, i: int):
+        """Return (image_id, width, height, raw_anns) WITHOUT opening the image.
+        Reads width/height from the XML <size> tag — much faster for large images."""
+        img_id = self.target_ids[i]
+        xml_path = self.ann_root / f"{img_id}.xml"
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+
+        size_el = root.find("size")
+        if size_el is not None:
+            width  = int(size_el.find("width").text)
+            height = int(size_el.find("height").text)
+        else:
+            # Fallback: open the image only if XML has no <size>
+            img_path = self.img_paths_dict[img_id]
+            img = Image.open(img_path)
+            width, height = img.size
+
+        out_anns = []
+        obj_counter = 1
+        for obj in root.findall("object"):
+            class_name = obj.find("name").text
+            if class_name not in self.LABELS_MAPPING:
+                continue
+            bndbox = obj.find("bndbox")
+            xmin = int(float(bndbox.find("xmin").text))
+            ymin = int(float(bndbox.find("ymin").text))
+            xmax = int(float(bndbox.find("xmax").text))
+            ymax = int(float(bndbox.find("ymax").text))
+            out_anns.append(InstanceAnn(
+                object_id=obj_counter,
+                class_id=self.LABELS_MAPPING[class_name],
+                instance_id=obj_counter,
+                mask_rle={"size": [height, width], "counts": b""},
+                bbox_xyxy=(xmin, ymin, xmax, ymax),
+            ))
+            obj_counter += 1
+
+        safe_img_id = int(img_id) if img_id.isdigit() else i
+        return safe_img_id, width, height, out_anns
     
 # TODO: IMPLEMENT THE DEART DATASET READER + SPLIT WITH FIXED SEED + UTILS AS IN KITTI-MOTS
 
