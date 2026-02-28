@@ -1,6 +1,6 @@
 project: "kitti-mots-yolo"
 output_dir: "results"
-experiment_name: "full_ft"
+experiment_name: "no_auto_optimizer"
 
 data:
   root: "~/mcv/datasets/C5/KITTI-MOTS/"
@@ -13,12 +13,22 @@ model:
   weights: "yolov10b.pt"
 
 training:
-  epochs: 40
   imgsz: 640
   batch_size: 16
-  lr: 0.0001
+  stages:
+    - name: "head_only_warmup"
+      epochs: 10
+      lr: 0.001
+      freeze: 22
+    - name: "more layers"
+      epochs: 15
+      lr: 0.0001
+      freeze: 10
+    - name: "full_finetune"
+      epochs: 10
+      lr: 0.000001
+      freeze: 0
   conf: 0
   nms_iou_threshold: 0.5
-  freeze_strategy: 1
   aug_strategy: "base"
   log_images_every: 5

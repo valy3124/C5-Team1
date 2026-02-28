@@ -1,0 +1,21 @@
+program: src.fine_tune.fine_tune_yolo
+project: "YOLO_FineTune_Sweep"
+method: grid
+metric:
+  name: val_coco_ap
+  goal: maximize
+parameters:
+  epochs:
+    value: 25
+  freeze:
+    values: [10, 22]
+  lr:
+    values: [0.00001]
+command:
+  - ${env}
+  - ${interpreter}
+  - "-m"
+  - ${program}
+  - "--config"
+  - "src/fine_tune/config_yolo_base.yaml"
+  - ${args}
