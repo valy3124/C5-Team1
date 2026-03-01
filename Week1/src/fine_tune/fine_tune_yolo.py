@@ -207,7 +207,7 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
     if args.imgsz: training["imgsz"] = args.imgsz
     if args.project: cfg["project"] = args.project
     if args.name: cfg["experiment_name"] = args.name
-    if args.freeze_strategy is not None: training["freeze_strategy"] = int(args.freeze_strategy)
+    if args.freeze is not None: training["freeze"] = int(args.freeze)
     if args.aug_strategy is not None: training["aug_strategy"] = str(args.aug_strategy)
 
     cfg.setdefault("data", {})
@@ -376,52 +376,61 @@ def log_predictions_to_wandb(exp: Exp, run: Run, data: Data, epoch: int, max_ima
     if logged_images:
         wandb.log({"val_predictions": logged_images, "epoch": epoch}, commit=False)
 
-def _freeze_layers_count(freeze_strategy: int) -> int:
-    """Returns number of layers to freeze based on selected strategy."""
-    if freeze_strategy == 1: return 22  # Backbone + Neck
-    if freeze_strategy == 2: return 10  # Backbone only
-    return 0                            # Full fine-tuning
-
 # ===========================================================================
 # Training
 # ===========================================================================
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
-    """Executes the Ultralytics training loop with custom callbacks."""
     cfg = exp.cfg
     training = cfg["training"]
-    num_epochs = training["epochs"]
-    batch_size = training["batch_size"]
-    lr = training["lr"]
-    
-    # Extract Augmentations
+    stages = training.get("stages", None)
+    if not stages:
+        stages = [{
+            "name": "run",
+            "epochs": training.get("epochs", 40),
+            "lr": training.get("lr", 1e-4),
+            "freeze": training.get("freeze", 0)
+        }]
+
+    batch_size = training.get("batch_size", 16)
     aug_strategy = training.get("aug_strategy", "base")
     aug_kwargs = get_augmentation_profile(aug_strategy)
-    
-    freeze_strategy = training.get("freeze_strategy", 1)
     imgsz = training.get("imgsz", 640)
-    
-    freeze_n = _freeze_layers_count(freeze_strategy)
     ul_project_dir = exp.output_dir / "ultralytics_runs"
     csv_path = exp.output_dir / "metrics_history.csv"
 
-    state = {"epoch": 0, "best_map": run.best_map, "best_epoch": run.best_epoch}
+    state = {
+        "overall_best_map": 0.0,
+        "global_epoch_offset": 0,
+        "stage_name": "",
+        "num_epochs": 0,
+        "best_map_stage": 0.0,
+        "best_epoch_stage": 0
+    }
 
-    # Callback: Custom COCO Eval and Logging
+    ul_project_dir = exp.output_dir / "ultralytics_runs"
+    csv_path = exp.output_dir / "metrics_history.csv"
+
+    state = {
+        "overall_best_map": 0.0,
+        "global_epoch_offset": 0,
+        "stage_name": "",
+        "num_epochs": 0,
+        "best_map_stage": 0.0,
+        "best_epoch_stage": 0
+    }
+
     def on_fit_epoch_end(trainer):
-        epoch = trainer.epoch + 1
-        state["epoch"] = epoch
+        local_epoch = trainer.epoch + 1
+        global_epoch = state["global_epoch_offset"] + local_epoch
         
-        # Log Augmented Training Data to W&B (Only on the first epoch)
-        if epoch == 1 and wandb.run is not None:
+        # Log Augmented Data
+        if global_epoch == 1 and wandb.run is not None:
             batch_images = list(Path(trainer.save_dir).glob("train_batch*.jpg"))
             if batch_images:
-                wandb.log({
-                    "augmented_train_batches": [wandb.Image(str(img)) for img in batch_images]
-                }, step=epoch, commit=False)
-        
+                wandb.log({"augmented_train_batches": [wandb.Image(str(img)) for img in batch_images]}, step=global_epoch, commit=False)
+
         metrics_ul = trainer.metrics or {}
-        
         val_box = float(metrics_ul.get("val/box_loss", 0.0))
         val_cls = float(metrics_ul.get("val/cls_loss", 0.0))
         val_dfl = float(metrics_ul.get("val/dfl_loss", 0.0))
@@ -441,84 +450,128 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             model = temp_model
 
         temp_run = TempRun()
-
         coco_result = evaluate(exp, temp_run, data, use_val=True)
         val_map_coco = coco_result.metrics.get("overall/AP", 0.0)
 
-        print(f"Epoch {epoch}/{num_epochs} | mAP50: {val_map50:.4f} | COCO AP: {val_map_coco:.4f}")
+        print(f"Stage '{state['stage_name']}' | Epoch {local_epoch}/{state['num_epochs']} (Global {global_epoch}) | COCO AP: {val_map_coco:.4f}")
 
-        # Checkpoint Handling
-        if val_map_coco > state["best_map"]:
-            state["best_map"] = val_map_coco
-            state["best_epoch"] = epoch
+        # Lógica de Checkpoints
+        if val_map_coco > state["best_map_stage"]:
+            state["best_map_stage"] = val_map_coco
+            state["best_epoch_stage"] = local_epoch
 
-            ul_best = Path(trainer.save_dir) / "weights" / "best.pt"
-            if ul_best.is_file():
-                shutil.copy2(str(ul_best), exp.best_model_path)
-
+        if val_map_coco > state["overall_best_map"]:
+            state["overall_best_map"] = val_map_coco
+            run.best_map = state["overall_best_map"]
+            run.best_epoch = global_epoch
+            if ul_last.is_file():
+                shutil.copy2(str(ul_last), exp.best_model_path)
             with open(exp.output_dir / "best_metrics.json", "w") as fh:
                 json.dump(coco_result.metrics, fh, indent=4)
 
-        if epoch % training.get("log_images_every", 5) == 0:
-            log_predictions_to_wandb(exp, temp_run, data, epoch=epoch)
+        if local_epoch % training.get("log_images_every", 5) == 0:
+            log_predictions_to_wandb(exp, temp_run, data, epoch=global_epoch)
 
-        # Reconstruct standard W&B logs to match fine_tune_faster_rcnn.py
-        train_box = float(metrics_ul.get("train/box_loss", 0.0))
-        train_cls = float(metrics_ul.get("train/cls_loss", 0.0))
-        train_dfl = float(metrics_ul.get("train/dfl_loss", 0.0))
-        train_loss = train_box + train_cls + train_dfl
+        # Train Loss Logging
+        if hasattr(trainer, "tloss") and trainer.tloss is not None:
+            train_loss = trainer.tloss.sum().item()
+        elif hasattr(trainer, "loss_items") and trainer.loss_items is not None:
+            train_loss = trainer.loss_items.sum().item()
+        else:
+            train_loss = 0.0
         val_loss = val_box + val_cls + val_dfl
 
         wandb_log = {
-            "epoch":       epoch,
-            "train_loss":  train_loss,
-            "val_loss":    val_loss,
+            "epoch": global_epoch,
+            "stage_name": state["stage_name"],
+            "train_loss": train_loss,
+            "val_loss": val_loss,
             "val_coco_ap": val_map_coco,
-            "best_map":    state["best_map"],
-            "best_epoch":  state["best_epoch"],
+            "best_map": state["overall_best_map"],
+            "best_epoch": run.best_epoch,
         }
         wandb_log.update({f"val_{k}": v for k, v in coco_result.metrics.items()})
         wandb.log(wandb_log)
 
-        # Basic CSV Tracking
         write_header = not csv_path.is_file()
         with open(csv_path, "a") as fh:
             if write_header:
-                fh.write("epoch,val_box_loss,val_cls_loss,val_map50,val_coco_ap\n")
-            fh.write(f"{epoch},{val_box:.6f},{val_cls:.6f},{val_map50:.6f},{val_map_coco:.6f}\n")
-            
-        trainer.model.train()
+                fh.write("global_epoch,stage,val_box_loss,val_cls_loss,val_map50,val_coco_ap\n")
+            fh.write(f"{global_epoch},{state['stage_name']},{val_box:.6f},{val_cls:.6f},{val_map50:.6f},{val_map_coco:.6f}\n")
 
-    # Callback: Finalize
     def on_train_end(trainer):
-        run.best_map, run.best_epoch = state["best_map"], state["best_epoch"]
-        print(f"Training complete. Best COCO AP: {run.best_map:.4f} at epoch {run.best_epoch}.")
+        print(f"Stage '{state['stage_name']}' complete. Stage best COCO AP: {state['best_map_stage']:.4f} at epoch {state['best_epoch_stage']}.")
 
-    # Register callbacks
-    run.model.model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
-    run.model.model.add_callback("on_train_end", on_train_end)
+    # Training Stages
+    for stage_idx, stage in enumerate(stages):
+        state["stage_name"] = stage.get("name", f"stage_{stage_idx+1}")
+        state["num_epochs"] = stage.get("epochs", 10)
+        state["best_map_stage"] = 0.0
+        state["best_epoch_stage"] = 0
+        
+        lr = stage.get("lr", 1e-4)
+        freeze = stage.get("freeze", 0)
+        run.model.model.callbacks["on_fit_epoch_end"] = [on_fit_epoch_end]
+        run.model.model.callbacks["on_train_end"] = [on_train_end]
 
-    print(f"Starting fine-tuning | freeze={freeze_n} | strategy={aug_strategy}")
+        
+        print(f"\n===========================================================")
+        print(f"Starting Stage: {state['stage_name']} | epochs: {state['num_epochs']} | lr: {lr} | freeze: {freeze} | aug: {aug_strategy}")
+        print(f"===========================================================\n")
 
-    # Launch Training
-    run.model.model.train(
-        data=str(data.data_yaml_path),
-        epochs=num_epochs,
-        batch=batch_size,
-        imgsz=640,
-        device=str(exp.device.index) if exp.device.type == "cuda" else "cpu",
-        lr0=lr,
-        freeze=freeze_n,
-        project=str(ul_project_dir),
-        name="run",
-        exist_ok=True,
-        save=True,
-        verbose=True,
-        warmup_epochs=3,
-        warmup_momentum=0.8,
-        warmup_bias_lr=0.1,
-        **aug_kwargs # Selected augmentation params
-    )   
+        # SOnly applied to the first stage
+        if stage_idx == 0:
+            warmup_e = max(0.0, min(5.0, state["num_epochs"] * 0.1))
+        else:
+            warmup_e = 0.0
+        if "model" not in run.model.model.overrides:
+            run.model.model.overrides["model"] = getattr(run.model.model, "ckpt_path", exp.cfg["model"].get("weights", "yolov10b.pt"))
+
+        run.model.model.train(
+            data=str(data.data_yaml_path),
+            epochs=state["num_epochs"],
+            batch=batch_size,
+            imgsz=imgsz,
+            device=str(exp.device.index) if exp.device.type == "cuda" else "cpu",
+            lr0=lr,
+            cos_lr=True,
+            optimizer="AdamW",
+            warmup_epochs=warmup_e,
+            warmup_momentum=0.8,
+            warmup_bias_lr=0.1,
+            freeze=freeze,
+            project=str(ul_project_dir),
+            name=state["stage_name"],
+            exist_ok=True,
+            save=True,
+            verbose=True,
+            **aug_kwargs 
+        )
+        
+        state["global_epoch_offset"] += state["num_epochs"]
+
+        # Load best weights from previous stage
+        if stage_idx < len(stages) - 1:
+            ul_best_relative = Path(ul_project_dir) / state["stage_name"] / "weights" / "best.pt"
+            ul_best_runs = Path("runs/detect") / ul_best_relative
+            
+            ul_best = ul_best_runs if ul_best_runs.is_file() else ul_best_relative
+
+            if ul_best.is_file():
+                print(f"Cargando los mejores pesos de {state['stage_name']} desde {ul_best} para la siguiente etapa...")
+                device_str = str(exp.device.index) if exp.device.type == "cuda" else "cpu"
+                run.model = UltralyticsYOLO(
+                    weights=str(ul_best),
+                    conf=run.model.conf, 
+                    iou=run.model.iou, 
+                    device=device_str, 
+                    map_coco=False
+                )
+                run.model.model.overrides["model"] = str(ul_best.resolve())
+            else:
+                print(f"Advertencia: best.pt de la etapa {state['stage_name']} no encontrado en {ul_best_relative} ni en {ul_best_runs}.")
+
+    print(f"\nAll stages complete. Best Overall COCO AP: {state['overall_best_map']:.4f} at global epoch {run.best_epoch}.")
     return run
 
 # ===========================================================================
@@ -544,7 +597,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, choices=["full", "search"], help="'full': strict val, 'search': dev split")
     parser.add_argument("--seed", type=int, help="Random seed for data splitting.")
     parser.add_argument("--split_ratio", type=float, help="Train fraction in 'search' mode.")
-    parser.add_argument("--freeze_strategy", type=int, help="1=freeze backbone+neck, 2=freeze backbone, 0=full training.")
+    parser.add_argument("--freeze", type=int, help="Number of layers to freeze. 0=full training, 22=freeze backbone+neck, etc.")
     parser.add_argument(
         "--aug_strategy", type=str, 
         choices=["none", "base", "heavy", "color_only"], 

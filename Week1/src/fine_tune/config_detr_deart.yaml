@@ -1,0 +1,30 @@
+project: "C5-Domain-Shift"
+experiment_name: "detr_deart_finetune"
+output_dir: "results"
+
+model:
+  name: "detr"
+  base_model: "facebook/detr-resnet-50"  # HuggingFace architecture to load
+  weights: "/ghome/group01/C5/vali/C5-Team1/Week1/results/detr/detr_Freeze_L3_LR_0.0001_x9kpvkwf/best_model.pth"  # Custom .pth state dict to load on top 
+  # weights: "facebook/detr-resnet-50"
+data:
+  dataset: "deart"
+  root: "/ghome/group01/C5/vali/C5-Team1/Week1/src/DEArt/"
+  num_workers: 4
+  mode: "search"
+  split_ratio: 0.8
+  seed: 42
+
+training:
+  epochs: 10            # Reduced for sweep: find best config fast, then run full 15-epoch job
+  batch_size: 8        # OK now that image_size is capped at 800px
+  val_batch_size: 8
+  image_size: 800      # Cap processor resize (default 1333 → 1333×1333 square = 3× more pixels)
+  lr: 0.0001         
+  freeze_strategy: 3   
+  aug_strategy: "base" 
+  weight_decay: 0.0001
+  gradient_clipping: 0.8
+  scheduler:
+    name: cosine
+    t_max: 10           # Must match epochs
