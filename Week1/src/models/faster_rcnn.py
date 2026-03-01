@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -46,14 +47,49 @@ class FasterRCNNModel(torch.nn.Module):
         self.device = device
         self.half = half
 
-        if weights is None:
-            weights = FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT
+        # If weights is a path to our fine-tuned model
+        if weights and os.path.isfile(weights):
+            # Load default architecture 
+            self.model = fasterrcnn_mobilenet_v3_large_fpn(
+                weights=FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT,
+                box_score_thresh=self.conf,
+                box_nms_thresh=self.iou
+            )
+            
+            in_feats = self.model.roi_heads.box_predictor.cls_score.in_features
+            state_dict = torch.load(weights, map_location="cpu")
+            if "model" in state_dict:
+                state_dict = state_dict["model"]
+            
+            # Remove "model." prefix 
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                if k.startswith("model."):
+                    new_state_dict[k[6:]] = v
+                else:
+                    new_state_dict[k] = v
+            state_dict = new_state_dict
+            
+            cls_score_weight = state_dict.get("roi_heads.box_predictor.cls_score.weight")
+            if cls_score_weight is not None:
+                num_classes = cls_score_weight.shape[0]
+                self.model.roi_heads.box_predictor = FastRCNNPredictor(in_feats, num_classes)
+            
+            self.model.load_state_dict(state_dict)
+            self.model = self.model.to(self.device)
 
-        self.model = fasterrcnn_mobilenet_v3_large_fpn(
-            weights=weights,
-            box_score_thresh=self.conf,
-            box_nms_thresh=self.iou
-        ).to(self.device)
+        else:
+            # Default behavior for original weights
+            if weights is None or weights == "DEFAULT":
+                tv_weights = FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT
+            else:
+                tv_weights = weights # Assuming it's a valid enum
+
+            self.model = fasterrcnn_mobilenet_v3_large_fpn(
+                weights=tv_weights,
+                box_score_thresh=self.conf,
+                box_nms_thresh=self.iou
+            ).to(self.device)
 
         # Will likely fail if not satisified
         if self.half:

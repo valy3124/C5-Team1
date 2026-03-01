@@ -41,8 +41,8 @@ from utils import (
 # Label mapping from model class IDs to COCO category IDs.
 # Model:  1 = Car,    2 = Pedestrian
 # COCO:   3 = Car,    1 = Person
-_MODEL_TO_COCO_LABEL = {1: 3, 2: 1}
-CLASS_NAMES = {1: "Car", 2: "Pedestrian"}
+# _MODEL_TO_COCO_LABEL = {1: 3, 2: 1}
+# CLASS_NAMES = {1: "Car", 2: "Pedestrian"}
 
 
 def setup_model(exp: Exp, data: Data) -> Run:
@@ -52,20 +52,37 @@ def setup_model(exp: Exp, data: Data) -> Run:
     model_name  = cfg["model"]["name"]
     weights     = cfg["model"].get("weights", "facebook/detr-resnet-50")
 
-    print(f"Initialising HuggingFace model: {model_name} from {weights}")
+    # Detect if weights is a local .pth state dict vs a HuggingFace model hub name
+    base_model = cfg["model"].get("base_model", "facebook/detr-resnet-50")
+    is_local_pth = isinstance(weights, str) and (weights.endswith(".pth") or weights.endswith(".pt"))
+    hf_source = base_model if is_local_pth else weights
 
-    processor = DetrImageProcessor.from_pretrained(weights)
+    print(f"Initialising HuggingFace model: {model_name} from {hf_source}")
+    if is_local_pth:
+        print(f"Will load custom state dict from: {weights}")
+
+    img_size = cfg["training"].get("image_size", 1333)
+    processor = DetrImageProcessor.from_pretrained(
+        hf_source,
+        size={"shortest_edge": img_size, "longest_edge": img_size},
+    )
     
     id2label = {i: label for i, label in enumerate(data.classes)}
     label2id = {label: i for i, label in enumerate(data.classes)}
 
     model = DetrForObjectDetection.from_pretrained(
-        weights,
+        hf_source,
         num_labels=len(data.classes),
         ignore_mismatched_sizes=True,
         id2label=id2label,
         label2id=label2id,
     )
+
+    # Load custom .pth state dict on top of the HF architecture
+    if is_local_pth:
+        state_dict = torch.load(weights, map_location="cpu")
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"Loaded state dict: {len(missing)} missing keys, {len(unexpected)} unexpected keys")
 
     # Implement simple Freeze Strategy for DETR
     freeze_strat = cfg["training"].get("freeze_strategy", 1)
@@ -102,7 +119,7 @@ def setup_model(exp: Exp, data: Data) -> Run:
     return Run(model=model, processor=processor, optimizer=optimizer, history=history, scheduler=scheduler)
 
 
-def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> Eval:
+def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any, label_mapping: Dict[int, int]) -> Eval:
     """Run inference on loader and compute COCO detection metrics."""
     model, processor, device = run.model, run.processor, exp.device
     model.eval()
@@ -122,7 +139,8 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> Eval:
             
             outputs = model(**batch_dict)
             
-            target_sizes = torch.tensor([img.shape[1:] for img in images]).to(device)
+            target_sizes = torch.stack([tgt["orig_size"] for tgt in targets]).to(device)
+            
             results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.0)
 
             # Stop timer and accumulate time
@@ -135,11 +153,11 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> Eval:
 
                 for box, score, label in zip(res["boxes"], res["scores"], res["labels"]):
                     cat_id = int(label.item())
-                    if cat_id not in _MODEL_TO_COCO_LABEL: continue
+                    if cat_id not in label_mapping: continue
 
                     coco_dt_list.append({
                         "image_id":    image_id,
-                        "category_id": _MODEL_TO_COCO_LABEL[cat_id],
+                        "category_id": label_mapping[cat_id],
                         "bbox":        _xyxy_to_xywh(box.cpu().tolist()),
                         "score":       float(score.item()),
                     })
@@ -168,6 +186,8 @@ def log_predictions_to_wandb(exp: Exp, data: Data, run: Run, epoch: int, max_ima
     model, processor, device = run.model, run.processor, exp.device
     model.eval()
     
+    class_names = {i: name for i, name in enumerate(data.classes)}
+    
     dataset_len = len(data.val_loader.dataset)
     step = max(1, dataset_len // max_images)
     target_indices = set(range(0, dataset_len, step))
@@ -187,8 +207,10 @@ def log_predictions_to_wandb(exp: Exp, data: Data, run: Run, epoch: int, max_ima
             batch_dict = {k: v.to(device) for k, v in batch_dict.items()}
             
             outputs = model(**batch_dict)
-            target_sizes = torch.tensor([img.shape[1:] for img in subset_images]).to(device)
-            results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.25)
+            
+            # Use orig_size to match the true dimensions of the ground truth
+            target_sizes = torch.stack([targets[i].get("orig_size", torch.tensor(images[i].shape[1:])) for i in log_in_batch]).to(device)
+            results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.60) #0.25
 
             for res, i in zip(results, log_in_batch):
                 img_np = (images[i].cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
@@ -196,18 +218,18 @@ def log_predictions_to_wandb(exp: Exp, data: Data, run: Run, epoch: int, max_ima
 
                 wandb_pred_boxes = [{
                     "position": {"minX": float(b[0]), "minY": float(b[1]), "maxX": float(b[2]), "maxY": float(b[3])},
-                    "class_id": int(l), "box_caption": f"{CLASS_NAMES.get(int(l), 'Unknown')} {s:.2f}",
+                    "class_id": int(l), "box_caption": f"{class_names.get(int(l), 'Unknown')} {s:.2f}",
                     "scores": {"score": float(s)}, "domain": "pixel"
                 } for b, l, s in zip(res["boxes"], res["labels"], res["scores"])]
 
                 wandb_gt_boxes = [{
                     "position": {"minX": float(b[0]), "minY": float(b[1]), "maxX": float(b[2]), "maxY": float(b[3])},
-                    "class_id": int(l), "box_caption": f"{CLASS_NAMES.get(int(l), 'Unknown')} (GT)", "domain": "pixel"
+                    "class_id": int(l), "box_caption": f"{class_names.get(int(l), 'Unknown')} (GT)", "domain": "pixel"
                 } for b, l in zip(tgt["boxes"].cpu().numpy(), tgt["labels"].cpu().numpy())]
 
                 logged_images.append(wandb.Image(img_np, boxes={
-                    "predictions":  {"box_data": wandb_pred_boxes, "class_labels": CLASS_NAMES},
-                    "ground_truth": {"box_data": wandb_gt_boxes,   "class_labels": CLASS_NAMES},
+                    "predictions":  {"box_data": wandb_pred_boxes, "class_labels": class_names},
+                    "ground_truth": {"box_data": wandb_gt_boxes,   "class_labels": class_names},
                 }))
 
             current_idx += batch_size
@@ -289,7 +311,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         val_loss = val_loss_sum / max(1, len(data.val_loader))
 
         # ---- Logging and Checkpointing ----
-        eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics)
+        eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics, data.label_mapping)
         val_map = eval_result.metrics["overall/AP"]
 
         run.history["train_loss"].append(train_loss)
@@ -338,9 +360,8 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 def main(args):
     exp  = setup_experiment(args.config, args)
     data = setup_data(exp)
-
-    current_aug = exp.cfg["data"].get("aug_strategy", "default")
-    wandb.run.name = f"detr_{current_aug}_Freeze_L{exp.cfg['training']['freeze_strategy']}"
+    
+    wandb.run.name = exp.cfg["experiment_name"]
     
     run  = setup_model(exp, data)
     run  = train(exp, data, run)

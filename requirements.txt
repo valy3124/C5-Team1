@@ -18,3 +18,4 @@ pycocotools
 albumentations
 thop # For calculating FLOPs
 timm # For loading models
+peft # For LoRA fine-tuning

@@ -5,6 +5,9 @@ __pycache__/
 # Logs and Results
 logs/
 results/
+Week1/src/results/
+Week1/results/
+Week1/runs/
 *.jsonl
 *.log
 *.out
