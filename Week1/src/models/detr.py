@@ -39,12 +39,36 @@ class HuggingFaceDETR:
         self.device = device
         self.half = half
 
+        import os
+        
         # Default model: ResNet-50 backbone
-        if weights is None:
-            weights = "facebook/detr-resnet-50"
+        if weights is None or weights == "DEFAULT":
+            hf_source = "facebook/detr-resnet-50"
+            is_local_pth = False
+        else:
+            is_local_pth = os.path.isfile(weights) and (weights.endswith(".pth") or weights.endswith(".pt"))
+            hf_source = "facebook/detr-resnet-50" if is_local_pth else weights
 
-        self.processor = DetrImageProcessor.from_pretrained(weights)
-        self.model = DetrForObjectDetection.from_pretrained(weights)
+        self.processor = DetrImageProcessor.from_pretrained(hf_source)
+        
+        self.model = DetrForObjectDetection.from_pretrained(
+            hf_source,
+            ignore_mismatched_sizes=True if is_local_pth else False
+        )
+        
+        if is_local_pth:
+            state_dict = torch.load(weights, map_location="cpu")
+            if "model" in state_dict:
+                state_dict = state_dict["model"]
+
+            cls_weight = state_dict.get("class_labels_classifier.weight")
+            if cls_weight is not None:
+                num_classes_in_ckpt = cls_weight.shape[0]
+                d_model = self.model.config.d_model
+                self.model.class_labels_classifier = torch.nn.Linear(d_model, num_classes_in_ckpt)
+            
+            missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+
         self.model.to(self.device)
         
         # Apply Half Precision if requested

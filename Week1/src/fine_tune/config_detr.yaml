@@ -3,7 +3,7 @@ experiment_name: "detr_baseline"
 output_dir: "results"
 
 data:
-  root: "/export/home/acs/stud/v/valentin.micu/C5/C5-Team1/dataset/"
+  root: "~/mcv/datasets/C5/KITTI-MOTS/"
   num_workers: 4
   mode: "search"       # Options: search (train on "train", validate on "dev"), full (train on "train_full", validate on "validation")
   split_ratio: 0.8     # For search mode
