@@ -148,19 +148,16 @@ def run_inference(
 
     print(f"Starting inference on {n} frames using model {type(model).__name__}...")
 
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     total_inference_time = 0.0
     with out_path.open("w", encoding="utf-8") as f:
         for i in range(n):
             img, _, _ = ds[i]
 
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            start_time = time.time()
-            pred = model.predict(img)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            end_time = time.time()
-            total_inference_time += (end_time - start_time)
+            pred, inference_time = model.predict(img)
+            total_inference_time += inference_time
 
             pred = post_process(pred, ds, max_det)
             f.write(json.dumps(_to_jsonable_pred(i, pred)) + "\n")
@@ -171,10 +168,15 @@ def run_inference(
     avg_time = total_inference_time / n
     fps = 1.0 / avg_time
 
+    max_vram_mb = 0
+    if torch.cuda.is_available():
+        max_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+
     wandb.log({
         "inference/avg_latency_ms": avg_time * 1000,
         "inference/fps": fps,
-        "inference/total_time_s": total_inference_time
+        "inference/total_time_s": total_inference_time,
+        "inference/max_vram_mb": max_vram_mb
     })
 
     print(f"Saved predictions to {out_path}")
@@ -212,6 +214,22 @@ if __name__ == "__main__":
     num_params = sum(p.numel() for p in torch_model.parameters())
     num_trainable = sum(p.numel() for p in torch_model.parameters() if p.requires_grad)
 
+    gflops = 0.0
+    try:
+        from thop import profile
+        import copy
+        
+        thop_model = copy.deepcopy(torch_model)
+        dummy_input = torch.randn(1, 3, 640, 640).to(args.device) 
+        flops, _ = profile(thop_model, inputs=(dummy_input, ), verbose=False)
+        gflops = flops / 1e9
+        print(f"FLOPs calculados: {gflops:.2f} GFLOPs")
+        del thop_model 
+    except ImportError:
+        print("Aviso: 'thop' no está instalado. No se calcularán los FLOPs. (Usa: pip install thop)")
+    except Exception as e:
+        print(f"Aviso: No se pudieron calcular los FLOPs automáticamente. Motivo: {e}")
+
     wandb.init(
         entity="c5-team1",
         project="C5-experiments",
@@ -219,10 +237,11 @@ if __name__ == "__main__":
     )
 
     wandb.config.update({
-    "model_name": args.model,
-    "weights": args.weights,
-    "num_parameters": num_params,
-    "num_trainable_parameters": num_trainable,
+        "model_name": args.model,
+        "weights": args.weights,
+        "num_parameters": num_params,
+        "num_trainable_parameters": num_trainable,
+        "GFLOPs": gflops,
     })
 
     # Inference

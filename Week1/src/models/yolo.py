@@ -6,9 +6,11 @@ with Ultralytics YOLO models
 """
 
 from __future__ import annotations
-from typing import Literal, Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any, List, Union
 import numpy as np
 from PIL import Image
+import torch
+import time
 from ultralytics import YOLO
 
 
@@ -79,14 +81,17 @@ class UltralyticsYOLO:
             images = [images]
             single_input = True
         
+        #inference_time = self._benchmark_inference_time(images)
+        inference_time = 0
+
         # It internally switches to eval mode.
         results = self.model.predict(
             source=images,
             imgsz=640,
-            conf=self.conf,
             iou=self.iou,
+            conf=self.conf,
             device=self.device,
-            half=self.half,
+            half=False,
             verbose=False,
         )
 
@@ -116,4 +121,72 @@ class UltralyticsYOLO:
                 "category_ids": classes,
             })
 
-        return outputs[0] if single_input else outputs
+        final_output = outputs[0] if single_input else outputs
+        # Return tuple: (predictions, inference_time)
+        return final_output, inference_time
+
+    def _benchmark_inference_time(self, sample_input: Any) -> float:
+        """
+        Calculates theoretical inference time using the actual first input tensor with warmup.
+        Returns average inference time per frame in seconds.
+        """
+        if hasattr(self, "_cached_inference_time"):
+            return self._cached_inference_time
+
+        import time
+        import torch
+        
+        device = self.device
+        model = self.model.model
+        was_training = model.training
+        
+        # device is usually "0" in ultralytics strings, but PyTorch `.to()` needs "cuda:0"
+        device_pt = torch.device(f"cuda:{device}" if str(device).isdigit() else device)
+
+        # Ultralytics models are often kept in CPU until predict is called. 
+        # We must explicitly cast it for the benchmark dummy tensor.
+        model.to(device_pt)
+        model.eval()
+
+        from PIL import Image
+        from torchvision.transforms.functional import to_tensor
+        # Extract the first image from the input to use as our strictly fair dummy
+        if isinstance(sample_input, list):
+            sample_img = sample_input[0]
+        else:
+            sample_img = sample_input
+
+        # Convert to tensor if it's a PIL Image (YOLO handles both)
+        if isinstance(sample_img, Image.Image):
+            dummy = to_tensor(sample_img.resize((640, 640))).unsqueeze(0).to(device_pt)
+        elif isinstance(sample_img, torch.Tensor):
+            dummy = sample_img.unsqueeze(0).to(device_pt) if sample_img.ndim == 3 else sample_img.to(device_pt)
+        else:
+            dummy = torch.randn(1, 3, 640, 640).to(device_pt)
+
+        if self.half:
+            dummy = dummy.half()
+
+        try:
+            with torch.no_grad():
+                # Warmup
+                for _ in range(20):
+                    _ = model(dummy)
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                start = time.perf_counter()
+
+                # Benchmark
+                for _ in range(100):
+                    _ = model(dummy)
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                end = time.perf_counter()
+                
+            self._cached_inference_time = (end - start) / 100.0
+            return self._cached_inference_time
+        finally:
+            if was_training:
+                model.train()

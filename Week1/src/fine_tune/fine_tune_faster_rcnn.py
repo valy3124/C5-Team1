@@ -107,7 +107,7 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> Eval:
             if device.type == "cuda": torch.cuda.synchronize()
             start_time = time.perf_counter()
             
-            preds = model.predict(imgs)  # Returns List[Dict[bboxes_xyxy, category_ids, scores]]
+            preds, _ = model.predict(imgs)  # Returns List[Dict[bboxes_xyxy, category_ids, scores]]
 
             #  Stop timer and accumulate time 
             if device.type == "cuda": torch.cuda.synchronize()
@@ -168,7 +168,7 @@ def log_predictions_to_wandb(exp: Exp, data: Data, run: Run, epoch: int, max_ima
                 continue
 
             subset_images = [images[i].to(device) for i in log_in_batch]
-            preds = model.predict(subset_images)
+            preds, _ = model.predict(subset_images)
 
             for pred, i in zip(preds, log_in_batch):
                 img_np = (images[i].cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)

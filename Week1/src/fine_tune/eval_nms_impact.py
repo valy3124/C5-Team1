@@ -151,7 +151,7 @@ def main():
         for idx in indices_to_test:
             try:
                 image, anns, meta = val_base[idx]
-                saved_predictions[idx][iou] = model.predict(image)
+                saved_predictions[idx][iou] = model.predict(image)[0]
             except IndexError:
                 pass
 
