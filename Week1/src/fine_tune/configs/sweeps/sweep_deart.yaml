@@ -1,24 +1,25 @@
-program: src/fine_tune/fine_tune.py
-project: "Fine-tune Faster R-CNN KITTI-MOTS"
+program: src/fine_tune/fine_tune_detr.py
+project: "C5-Domain-Shift"
 method: grid
 metric:
-  name: val_coco_ap
+  name: val_overall/AP
   goal: maximize
 parameters:
   epochs:
     value: 10
   aug_strategy:
-    value: "legacy"
+    value: "base"
   name_fields:
     value: "freeze_strategy,lr"
   freeze_strategy:
-    values: [1, 2, 3, 4]
+    values: [3]
   lr:
-    values: [0.0001, 0.00005, 0.00001]
+    values: [0.00005, 0.00001]
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - "--config"
-  - "src/fine_tune/config_example.yaml"
+  - "src/fine_tune/configs/single_run/config_detr_deart.yaml"
   - ${args}
+

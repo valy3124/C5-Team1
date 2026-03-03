@@ -19,5 +19,5 @@ command:
   - "-m"
   - ${program}
   - "--config"
-  - "src/fine_tune/config_yolo_base.yaml"
+  - "src/fine_tune/configs/single_run/config_yolo_base.yaml"
   - ${args}

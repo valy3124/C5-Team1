@@ -1,5 +1,5 @@
-program: src/fine_tune/fine_tune_rt_detr.py
-project: "Fine-tune RT-DETR KITTI-MOTS"
+program: src/fine_tune/fine_tune_detr.py
+project: "Fine-tune DETR KITTI-MOTS"
 method: grid
 metric:
   name: val_coco_ap
@@ -8,11 +8,11 @@ parameters:
   epochs:
     value: 10
   aug_strategy:
-    value: "base"
+    value: "legacy"
   name_fields:
     value: "freeze_strategy,lr"
   freeze_strategy:
-    values: [1, 2, 3] # Level 3 is max for RT-DETR
+    values: [0] #[1, 2, 3] # Level 3 is max for DETR 
   lr:
     values: [0.0001, 0.00005, 0.00001]
 command:
@@ -20,5 +20,5 @@ command:
   - ${interpreter}
   - ${program}
   - "--config"
-  - "src/fine_tune/config_rtdetr.yaml"
+  - "src/fine_tune/configs/single_run/config_detr.yaml"
   - ${args}

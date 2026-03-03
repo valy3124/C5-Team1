@@ -1,8 +1,8 @@
-program: src/fine_tune/fine_tune_detr.py
-project: "C5-Domain-Shift"
+program: src/fine_tune/fine_tune_rt_detr.py
+project: "Fine-tune RT-DETR KITTI-MOTS"
 method: grid
 metric:
-  name: val_overall/AP
+  name: val_coco_ap
   goal: maximize
 parameters:
   epochs:
@@ -12,14 +12,13 @@ parameters:
   name_fields:
     value: "freeze_strategy,lr"
   freeze_strategy:
-    values: [3]
+    values: [1, 2, 3] # Level 3 is max for RT-DETR
   lr:
-    values: [0.00005, 0.00001]
+    values: [0.0001, 0.00005, 0.00001]
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - "--config"
-  - "src/fine_tune/config_detr_deart.yaml"
+  - "src/fine_tune/configs/single_run/config_rtdetr.yaml"
   - ${args}
-

@@ -39,12 +39,6 @@ from utils import (
     get_common_parser, _xyxy_to_xywh
 )
 
-# Label mapping from model class IDs to COCO category IDs.
-# Model:  1 = Car,    2 = Pedestrian
-# COCO:   3 = Car,    1 = Person
-# _MODEL_TO_COCO_LABEL = {1: 3, 2: 1}
-# CLASS_NAMES = {1: "Car", 2: "Pedestrian"}
-
 
 def setup_model(exp: Exp, data: Data) -> Run:
     """Instantiate the HuggingFace DETR model, processor, optimizer, and scheduler."""
@@ -85,7 +79,7 @@ def setup_model(exp: Exp, data: Data) -> Run:
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         print(f"Loaded state dict: {len(missing)} missing keys, {len(unexpected)} unexpected keys")
 
-    # ---- LoRA or standard freeze strategy ----
+    # Either LoRA or standard freeze strategy
     lora_cfg = cfg["model"].get("lora", {})
     if lora_cfg.get("enabled", False):
         # Backbone always frozen; LoRA adapters train the encoder+decoder attention
@@ -142,7 +136,7 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any, label_mapping: D
     model.eval()
     coco_dt_list = []
     
-    # --- NEW: Initialize tracking variables ---
+    # Initialize tracking variables
     total_inference_time = 0.0
     total_images = 0
 
@@ -199,7 +193,7 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any, label_mapping: D
 
 
 def log_predictions_to_wandb(exp: Exp, data: Data, run: Run, epoch: int, max_images: int = 4) -> None:
-    """Upload a sample of validation images with predicted and GT boxes to W&B."""
+    #Upload a sample of validation images with predicted and GT boxes to W&B.
     model, processor, device = run.model, run.processor, exp.device
     model.eval()
     
@@ -257,7 +251,7 @@ def log_predictions_to_wandb(exp: Exp, data: Data, run: Run, epoch: int, max_ima
 
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
-    """Run the full training loop."""
+    #Run the full training loop.
     num_epochs = exp.cfg["training"]["epochs"]
     print("Starting training…")
 
@@ -265,7 +259,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     for epoch in tqdm(range(num_epochs), desc="Epochs", mininterval=60, ascii=True):
         if exp.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(exp.device)
-        # ---- Training pass ----
+        # Training pass
         run.model.train()
         train_loss_sum = 0.0
 
@@ -301,7 +295,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         train_loss = train_loss_sum / max(1, len(data.train_loader))
 
-        # ---- Validation loss pass ----
+        # Validation loss pass
         run.model.eval() 
         val_loss_sum = 0.0
 
@@ -327,7 +321,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         val_loss = val_loss_sum / max(1, len(data.val_loader))
 
-        # ---- Logging and Checkpointing ----
+        # Logging and Checkpointing
         eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics, data.label_mapping)
         val_map = eval_result.metrics["overall/AP"]
 
@@ -347,9 +341,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             run.best_map, run.best_epoch = val_map, epoch
             
             if hasattr(run.model, 'save_pretrained'):
-                # Best practice: Save the PEFT adapters safely
                 run.model.save_pretrained(exp.output_dir)
-                # Also save the full state dict just in case your evaluation script expects a .pth
                 torch.save(run.model.state_dict(), exp.best_model_path)
             else:
                 torch.save(run.model.state_dict(), exp.best_model_path)
@@ -359,7 +351,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             with open(os.path.join(exp.output_dir, "best_predictions.jsonl"), "w") as fh:
                 for pred in eval_result.predictions:
                     fh.write(json.dumps(pred) + "\n")
-            print(f"  >>> New best: COCO AP {run.best_map:.4f} at epoch {epoch + 1}")
+            print(f"New best: COCO AP {run.best_map:.4f} at epoch {epoch + 1}")
 
         peak_vram_gb = torch.cuda.max_memory_allocated(exp.device) / 1024**3 if exp.device.type == "cuda" else 0
         wandb_log = {"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss, "val_coco_ap": val_map, "best_map": run.best_map, "best_epoch": run.best_epoch, "inference_fps": eval_result.inference_fps,"inference_latency_ms": eval_result.inference_latency_ms, "peak_vram_gb": peak_vram_gb}
@@ -385,7 +377,7 @@ def main(args):
     exp  = setup_experiment(args.config, args)
     data = setup_data(exp)
     
-    # Tag the run name so you know it's a baseline
+    # Tag the run name
     if args.eval_only:
         exp.cfg["experiment_name"] += "_ZERO_SHOT"
         
@@ -399,10 +391,10 @@ def main(args):
         
         print(f"\nZero-Shot COCO AP: {eval_result.metrics['overall/AP']:.4f}")
         
-        # Log 8 images to WandB so you can visually see the baseline mistakes!
+        # Log 8 images to WandB to visualise 
         log_predictions_to_wandb(exp, data, run, epoch=0, max_images=8)
         
-        # Log metrics to WandB
+        # Log metrics to WandBS
         wandb_log = {f"zero_shot_val_{k}": v for k, v in eval_result.metrics.items()}
         wandb_log["inference_fps"] = eval_result.inference_fps
         wandb.log(wandb_log)

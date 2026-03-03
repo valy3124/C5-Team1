@@ -15,7 +15,7 @@ echo "Starting single run on node: $HOSTNAME"
 echo "Using GPU: $CUDA_VISIBLE_DEVICES"
 
 python src/fine_tune/fine_tune_detr.py \
-    --config src/fine_tune/config_detr_deart.yaml \
+    --config src/fine_tune/configs/single_run/config_detr_deart.yaml \
     --lr 0.00005 \
     --freeze_strategy 2 \
     --epochs 10

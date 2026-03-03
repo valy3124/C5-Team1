@@ -26,5 +26,5 @@ command:
   - ${interpreter}
   - ${program}
   - "--config"
-  - "src/fine_tune/config_example.yaml"
+  - "src/fine_tune/configs/single_run/config_example.yaml"
   - ${args}

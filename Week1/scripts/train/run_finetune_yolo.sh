@@ -11,4 +11,4 @@ source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
 
 # Run training
-python src/fine_tune/fine_tune_faster_rcnn.py --config src/fine_tune/config_final_faster_rcnn.yaml
+python -m src.fine_tune.fine_tune_yolo --config src/fine_tune/configs/single_run/config_example_yolo.yaml

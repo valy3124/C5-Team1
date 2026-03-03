@@ -15,5 +15,5 @@ echo "Starting Zero-Shot Evaluation..."
 
 # Notice the new --eval_only flag!
 python src/fine_tune/fine_tune_detr.py \
-    --config src/fine_tune/config_detr_deart.yaml \
+    --config src/fine_tune/configs/single_run/config_detr_deart.yaml \
     --eval_only
