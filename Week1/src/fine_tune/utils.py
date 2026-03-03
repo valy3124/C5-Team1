@@ -105,6 +105,7 @@ def get_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--optimizer", type=str, help="Override optimizer.")
     parser.add_argument("--scheduler", type=str, help="Override scheduler name.")
     parser.add_argument("--gradient_clipping", type=float, help="Override gradient clipping max norm.")
+    parser.add_argument("--eval_only", action="store_true", help="Run evaluation only, skip training.")
     return parser
 
 # ===========================================================================

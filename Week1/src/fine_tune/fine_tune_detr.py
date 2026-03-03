@@ -30,6 +30,7 @@ import numpy as np
 from tqdm import tqdm
 from typing import Any, Dict, List
 from transformers import DetrForObjectDetection, DetrImageProcessor
+from peft import LoraConfig, get_peft_model
 
 # Import our shared utilities
 from utils import (
@@ -84,15 +85,31 @@ def setup_model(exp: Exp, data: Data) -> Run:
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         print(f"Loaded state dict: {len(missing)} missing keys, {len(unexpected)} unexpected keys")
 
-    # Implement simple Freeze Strategy for DETR
-    freeze_strat = cfg["training"].get("freeze_strategy", 1)
-    
-    if freeze_strat >= 1:
-        for param in model.model.backbone.parameters(): param.requires_grad = False
-    if freeze_strat >= 2:
-        for param in model.model.encoder.parameters(): param.requires_grad = False
-    if freeze_strat >= 3:
-        for param in model.model.decoder.parameters(): param.requires_grad = False
+    # ---- LoRA or standard freeze strategy ----
+    lora_cfg = cfg["model"].get("lora", {})
+    if lora_cfg.get("enabled", False):
+        # Backbone always frozen; LoRA adapters train the encoder+decoder attention
+        for param in model.model.backbone.parameters():
+            param.requires_grad = False
+        lora_config = LoraConfig(
+            r=lora_cfg.get("r", 16),
+            lora_alpha=lora_cfg.get("alpha", 32),
+            lora_dropout=lora_cfg.get("dropout", 0.1),
+            target_modules=lora_cfg.get("target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]),
+            bias="none",
+            modules_to_save=["class_labels_classifier", "bbox_predictor"]
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+    else:
+        # Standard freeze strategy
+        freeze_strat = cfg["training"].get("freeze_strategy", 1)
+        if freeze_strat >= 1:
+            for param in model.model.backbone.parameters(): param.requires_grad = False
+        if freeze_strat >= 2:
+            for param in model.model.encoder.parameters(): param.requires_grad = False
+        if freeze_strat >= 3:
+            for param in model.model.decoder.parameters(): param.requires_grad = False
 
     model.to(device)
 
@@ -328,7 +345,14 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         if val_map > run.best_map:
             run.best_map, run.best_epoch = val_map, epoch
-            torch.save(run.model.state_dict(), exp.best_model_path)
+            
+            if hasattr(run.model, 'save_pretrained'):
+                # Best practice: Save the PEFT adapters safely
+                run.model.save_pretrained(exp.output_dir)
+                # Also save the full state dict just in case your evaluation script expects a .pth
+                torch.save(run.model.state_dict(), exp.best_model_path)
+            else:
+                torch.save(run.model.state_dict(), exp.best_model_path)
             
             with open(os.path.join(exp.output_dir, "best_metrics.json"), "w") as fh: 
                 json.dump(eval_result.metrics, fh, indent=4)
@@ -361,10 +385,31 @@ def main(args):
     exp  = setup_experiment(args.config, args)
     data = setup_data(exp)
     
+    # Tag the run name so you know it's a baseline
+    if args.eval_only:
+        exp.cfg["experiment_name"] += "_ZERO_SHOT"
+        
     wandb.run.name = exp.cfg["experiment_name"]
     
     run  = setup_model(exp, data)
-    run  = train(exp, data, run)
+    
+    if args.eval_only:
+        print("Running Zero-Shot Evaluation")
+        eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics, data.label_mapping)
+        
+        print(f"\nZero-Shot COCO AP: {eval_result.metrics['overall/AP']:.4f}")
+        
+        # Log 8 images to WandB so you can visually see the baseline mistakes!
+        log_predictions_to_wandb(exp, data, run, epoch=0, max_images=8)
+        
+        # Log metrics to WandB
+        wandb_log = {f"zero_shot_val_{k}": v for k, v in eval_result.metrics.items()}
+        wandb_log["inference_fps"] = eval_result.inference_fps
+        wandb.log(wandb_log)
+    else:
+        # Standard training loop
+        run  = train(exp, data, run)
+        
     wandb.finish()
 
 

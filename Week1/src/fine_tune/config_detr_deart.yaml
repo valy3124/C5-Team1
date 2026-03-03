@@ -7,6 +7,12 @@ model:
   base_model: "facebook/detr-resnet-50"  # HuggingFace architecture to load
   weights: "/ghome/group01/C5/vali/C5-Team1/Week1/results/detr/detr_Freeze_L3_LR_0.0001_x9kpvkwf/best_model.pth"  # Custom .pth state dict to load on top 
   # weights: "facebook/detr-resnet-50"
+  lora:
+    enabled: false
+    r: 16              # Rank of the low-rank matrices
+    alpha: 32          # LoRA scaling factor (alpha/r = 2.0 is standard)
+    dropout: 0.1
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]  # All attention projections
 data:
   dataset: "deart"
   root: "/ghome/group01/C5/vali/C5-Team1/Week1/src/DEArt/"

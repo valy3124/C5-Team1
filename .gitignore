@@ -8,6 +8,7 @@ results/
 Week1/src/results/
 Week1/results/
 Week1/runs/
+Week1/src/DEArt/
 *.jsonl
 *.log
 *.out
