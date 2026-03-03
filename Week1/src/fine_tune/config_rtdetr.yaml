@@ -1,0 +1,29 @@
+project: "Fine-tune RT-DETR KITTI-MOTS"
+experiment_name: "rtdetr_example"
+output_dir: "results"
+
+data:
+  root: "~/mcv/datasets/C5/KITTI-MOTS/"
+  num_workers: 4
+  mode: "full"       # Options: search, full
+  split_ratio: 0.8     # For search mode
+  seed: 42             # For deterministic splitting
+
+model:
+  name: "rt_detr" # Options: faster_rcnn, yolo, detr, rt_detr
+  weights: "PekingU/rtdetr_r50vd" # Standard HuggingFace RT-DETR checkpoint
+
+training:
+  epochs: 25
+  batch_size: 8        
+  val_batch_size: 8
+  lr: 0.00015
+  freeze_strategy: 3   # 1: Freeze backbone. 2: Freeze backbone + encoder. 3: Freeze everything except heads
+  optimizer: "adamw"
+  gradient_clipping:  0.8
+  aug_strategy: "base"
+  name_fields: "freeze_strategy,lr,optimizer,aug_strategy,gradient_clipping,scheduler"
+  scheduler: 
+    name: "cosine"
+    t_max: 25  
+debug: false
