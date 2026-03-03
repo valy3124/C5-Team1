@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 from torch.utils.data import DataLoader
 
-# Add Week1 to sys.path so `src` can be imported
 script_dir = Path(__file__).resolve().parent
 week_dir = script_dir.parent.parent
 sys.path.append(str(week_dir))
@@ -60,7 +59,7 @@ def plot_comparisons(image, gt_anns, predictions_dict, output_path, conf_thresho
     num_subplots = 1 + len(predictions_dict)
     fig, axes = plt.subplots(1, num_subplots, figsize=(5 * num_subplots, 4))
 
-    # 1. Ground Truth
+    # Ground Truth
     axes[0].imshow(image)
     gt_boxes  = np.array([ann.bbox_xyxy for ann in gt_anns])
     gt_labels = np.array([ann.class_id   for ann in gt_anns])
@@ -69,7 +68,7 @@ def plot_comparisons(image, gt_anns, predictions_dict, output_path, conf_thresho
     axes[0].set_title("Ground Truth")
     axes[0].axis("off")
 
-    # 2. Each NMS threshold prediction
+    # Each NMS threshold prediction
     for ax_idx, (iou_thresh, pred) in enumerate(predictions_dict.items(), start=1):
         axes[ax_idx].imshow(image)
 
@@ -126,14 +125,14 @@ def main():
     num_classes     = 3  # background + Car + Pedestrian
     freeze_strategy = cfg['training'].get('freeze_strategy', 1)
 
-    # ----- Sweep -----
+    # Sweep
     iou_thresholds   = [0.3, 0.5, 0.7, 0.9]
     indices_to_test  = [100, 300, 600, 800, 1000, 1500]
     metrics_results  = {}
     saved_predictions = {idx: {} for idx in indices_to_test}
 
     for iou in iou_thresholds:
-        print(f"\n=================================\nEvaluating NMS Threshold: {iou}\n=================================")
+        print(f"\n\nEvaluating NMS Threshold: {iou}\n")
 
         model = FasterRCNNModel(weights=None, device=str(device), iou=iou)
         model.prepare_finetune(num_classes=num_classes, freeze_strategy=freeze_strategy)
@@ -145,9 +144,9 @@ def main():
         eval_result = evaluate(exp, run, val_loader, metrics_obj)
         map_score   = eval_result.metrics.get('overall/AP', 0.0)
         print(f"-> mAP for NMS {iou}: {map_score:.4f}")
-        metrics_results[str(iou)] = eval_result.metrics   # JSON keys must be str
+        metrics_results[str(iou)] = eval_result.metrics  
 
-        # Grab raw predictions for qualitative plots
+        # raw predictions for qualitative plots
         for idx in indices_to_test:
             try:
                 image, anns, meta = val_base[idx]
@@ -155,7 +154,7 @@ def main():
             except IndexError:
                 pass
 
-    # ----- Save JSON -----
+    # Save JSON
     metrics_path = output_dir / "nms_metrics.json"
     with open(metrics_path, "w") as f:
         json.dump(metrics_results, f, indent=4)
@@ -173,8 +172,7 @@ def main():
             m.get('overall/AP_75', 0),
         ))
 
-    # ----- Save plots -----
-    print("\nGenerating side-by-side plots...")
+    #  Save plots
     for idx in indices_to_test:
         try:
             image, anns, meta = val_base[idx]

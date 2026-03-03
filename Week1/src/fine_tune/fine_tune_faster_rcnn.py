@@ -131,10 +131,10 @@ def evaluate(exp: Exp, run: Run, loader: Any, metrics_obj: Any) -> Eval:
 
     if not coco_dt_list:
         print("Warning: no predictions were generated for this split.")
-        # eturn 0 for speed metrics if it fails 
+        # return 0 for speed metrics if it fails 
         return Eval(predictions=[], metrics={"coco/AP": 0.0}, inference_fps=0.0, inference_latency_ms=0.0)
 
-    # - Calculate Latency and FPS 
+    # Calculate Latency and FPS 
     avg_latency_ms = (total_inference_time / total_images) * 1000 if total_images > 0 else 0.0
     fps = total_images / total_inference_time if total_inference_time > 0 else 0.0
 
@@ -207,7 +207,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         if exp.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(exp.device)
             
-        # ---- Training pass ----
+        #  Training pass 
         run.model.train()
         train_loss_sum = 0.0
 
@@ -232,7 +232,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         train_loss = train_loss_sum / max(1, len(data.train_loader))
 
-        # ---- Evaluation pass ----
+        # Evaluation pass
         eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics)
         val_map = eval_result.metrics["overall/AP"]
 
@@ -247,7 +247,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         if run.scheduler is not None:
             run.scheduler.step()
 
-        # ---- Checkpoint best model ----
+        # Checkpoint best model
         if val_map > run.best_map:
             run.best_map, run.best_epoch = val_map, epoch
             torch.save(run.model.state_dict(), exp.best_model_path)
@@ -259,7 +259,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
                     fh.write(json.dumps(pred) + "\n")
             print(f"  >>> New best: COCO AP {run.best_map:.4f} at epoch {epoch + 1}")
 
-        # ---- Logging ----
+        # Logging 
         peak_vram_gb = torch.cuda.max_memory_allocated(exp.device) / 1024**3 if exp.device.type == "cuda" else 0
         wandb_log = {"epoch": epoch + 1, "train_loss": train_loss, "val_coco_ap": val_map, "best_map": run.best_map, "best_epoch": run.best_epoch, "inference_fps": eval_result.inference_fps, "inference_latency_ms": eval_result.inference_latency_ms, "peak_vram_gb": peak_vram_gb}
         wandb_log.update({f"val_{k}": v for k, v in eval_result.metrics.items()})

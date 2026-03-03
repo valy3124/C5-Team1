@@ -32,9 +32,7 @@ for p in (str(src_dir), str(week1_dir)):
     if p not in sys.path:
         sys.path.append(p)
 
-# ===========================================================================
 # Dataset Definitions & Mappings
-# ===========================================================================
 
 # KITTI-MOTS: 1=Car, 2=Pedestrian -> YOLO: 0=Car, 1=Pedestrian
 _KITTI_TO_YOLO_CLS: Dict[int, int] = {1: 0, 2: 1}
@@ -43,10 +41,8 @@ YOLO_CLASS_NAMES: List[str] = ["Car", "Pedestrian"]
 # YOLO output -> COCO standard IDs: 0(Car)=3, 1(Pedestrian)=1
 _YOLO_TO_COCO_LABEL: Dict[int, int] = {0: 3, 1: 1}
 
-# ===========================================================================
-# Data Containers
-# ===========================================================================
 
+# Data Containers
 @dataclass
 class Exp:
     """Experiment configuration and environment state."""
@@ -85,9 +81,7 @@ class Eval:
     predictions: List[Dict]
     metrics: Dict[str, float]
 
-# ===========================================================================
 # Utility Helpers & Augmentation Profiles
-# ===========================================================================
 
 def _xyxy_to_xywh(box) -> List[float]:
     """Convert [x1, y1, x2, y2] to COCO [x, y, w, h] format."""
@@ -144,9 +138,7 @@ def get_augmentation_profile(strategy: str) -> Dict[str, float]:
         
     return profiles[strategy]
 
-# ===========================================================================
 # Data Export Functions
-# ===========================================================================
 
 def export_yolo_dataset(raw_ds, split_name: str, output_root: Path) -> None:
     """Exports a raw KITTI-MOTS split to the YOLO format on disk."""
@@ -201,9 +193,7 @@ def write_yolo_data_yaml(dataset_root: Path) -> Path:
     print(f"YOLO data.yaml → {yaml_path}")
     return yaml_path
 
-# ===========================================================================
 # Setup Functions
-# ===========================================================================
 
 def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
     """Loads config, applies CLI overrides, and sets up paths/W&B."""
@@ -327,9 +317,7 @@ def setup_model(exp: Exp) -> Run:
     )
     return Run(model=wrapper)
 
-# ===========================================================================
 # Evaluation & Logging
-# ===========================================================================
 
 def evaluate(exp: Exp, run: Run, data: Data, use_val: bool = True) -> Eval:
     """Evaluates model using COCO metrics over raw datasets."""
@@ -411,9 +399,7 @@ def log_predictions_to_wandb(exp: Exp, run: Run, data: Data, epoch: int, max_ima
     if logged_images:
         wandb.log({"val_predictions": logged_images, "epoch": epoch}, commit=False)
 
-# ===========================================================================
 # Training
-# ===========================================================================
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
     cfg = exp.cfg
@@ -549,9 +535,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         run.model.model.callbacks["on_train_end"] = [on_train_end]
 
         
-        print(f"\n===========================================================")
         print(f"Starting Stage: {state['stage_name']} | epochs: {state['num_epochs']} | lr: {lr} | freeze: {freeze} | aug: {aug_strategy}")
-        print(f"===========================================================\n")
 
         # SOnly applied to the first stage
         if stage_idx == 0:
@@ -608,10 +592,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     print(f"\nAll stages complete. Best Overall COCO AP: {state['overall_best_map']:.4f} at global epoch {run.best_epoch}.")
     return run
 
-# ===========================================================================
 # Entry Point
-# ===========================================================================
-
 def main(args: argparse.Namespace) -> None:
     exp = setup_experiment(args.config, args)
     data = setup_data(exp)

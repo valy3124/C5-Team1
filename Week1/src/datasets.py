@@ -72,8 +72,6 @@ class KITTIMOTS:
 
         # Build (seq, frame, img_path)
         self.index: List[Tuple[str, int, Path]] = self._build_index()
-
-        # Cache parsed txt per sequence
         self._txt_cache: Dict[str, Dict[int, List[InstanceAnn]]] = {}
 
     def __len__(self) -> int:
@@ -322,14 +320,11 @@ class DEART:
     def __getitem__(self, i: int) -> Tuple[Image.Image, List[InstanceAnn]]:
         img_id = self.target_ids[i]
         
-        # O(1) Instant lookup! No more searching the hard drive.
         img_path = self.img_paths_dict[img_id]
         
-        # 2. Open the image
+        # 2. Open the image and parse the XML annotations
         image = Image.open(img_path).convert("RGB")
         width, height = image.size
-
-        # 3. Parse the XML annotation
         xml_path = self.ann_root / f"{img_id}.xml"
         tree = ET.parse(xml_path)
         root = tree.getroot()
@@ -385,7 +380,6 @@ class DEART:
             width  = int(size_el.find("width").text)
             height = int(size_el.find("height").text)
         else:
-            # Fallback: open the image only if XML has no <size>
             img_path = self.img_paths_dict[img_id]
             img = Image.open(img_path)
             width, height = img.size
@@ -413,7 +407,6 @@ class DEART:
         safe_img_id = int(img_id) if img_id.isdigit() else i
         return safe_img_id, width, height, out_anns
     
-# TODO: IMPLEMENT THE DEART DATASET READER + SPLIT WITH FIXED SEED + UTILS AS IN KITTI-MOTS
 
 if __name__ == "__main__":
     import random

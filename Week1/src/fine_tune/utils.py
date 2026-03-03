@@ -20,9 +20,7 @@ from typing import Dict
 from pycocotools.cocoeval import COCOeval
 from pycocotools.coco import COCO
 
-# ---------------------------------------------------------------------------
 # Path bootstrap
-# ---------------------------------------------------------------------------
 def bootstrap_paths():
     """Add src/ and Week1/ to sys.path so we can import project modules."""
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,14 +30,11 @@ def bootstrap_paths():
         if p not in sys.path:
             sys.path.append(p)
 
-# Call immediately so other modules can import `datasets`
 bootstrap_paths()
 import datasets
 from inference.evaluation import CocoMetrics
 
-# ===========================================================================
 # Data Containers
-# ===========================================================================
 @dataclass
 class Exp:
     cfg:             Dict[str, Any]
@@ -74,9 +69,7 @@ class Eval:
     inference_fps: float = 0.0          
     inference_latency_ms: float = 0.0 
 
-# ===========================================================================
 # Utility Helpers
-# ===========================================================================
 def collate_fn(batch):
     images, targets = zip(*batch)
     return list(images), list(targets)
@@ -108,9 +101,7 @@ def get_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--eval_only", action="store_true", help="Run evaluation only, skip training.")
     return parser
 
-# ===========================================================================
 # Setup Functions
-# ===========================================================================
 def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
     with open(config_path) as fh:
         cfg = yaml.safe_load(fh)
@@ -187,9 +178,7 @@ def build_scheduler(optimizer, cfg: Dict[str, Any]) -> Optional[Any]:
     raise ValueError(f"Unknown scheduler '{name}'.")
 
 
-# ===========================================================================
 # Dataset Adapters & Evaluator 
-# ===========================================================================
 class KITTIMOTSToTorchvision(torch.utils.data.Dataset):
     def __init__(self, base_ds: torch.utils.data.Dataset) -> None:
         self.base_ds = base_ds
@@ -260,7 +249,6 @@ class BaseToTorchvision(torch.utils.data.Dataset):
             labels_t = torch.tensor(labels, dtype=torch.int64)   if labels else torch.zeros((0,),   dtype=torch.int64)
             return image_id, width, height, boxes_t, labels_t
         else:
-            # Fallback: load the image (slow but safe for KITTI which is small)
             img_np, target = self[idx]
             h, w = img_np.shape[0], img_np.shape[1]
             return int(target['image_id'].item()), w, h, target['boxes'], target['labels']
@@ -273,7 +261,7 @@ class BaseToTorchvision(torch.utils.data.Dataset):
         for ann in raw_anns:
             cls = int(getattr(ann, "class_id", -1))
             if cls in self.label_remap: 
-                cls = self.label_remap[cls] # Trick the model!
+                cls = self.label_remap[cls]
                 
             box = getattr(ann, "bbox_xyxy", None)
             if box is None: continue
@@ -314,7 +302,6 @@ class MemoryMetrics:
         for cid in set(label_mapping.values()):
             dataset_dict["categories"].append({"id": cid, "name": f"Class_{cid}"})
 
-        # Unwrap ApplyAlbumentations to get the BaseToTorchvision underneath
         base_tv = getattr(torchvision_dataset, 'ds', torchvision_dataset)
 
         ann_id = 1
@@ -323,7 +310,6 @@ class MemoryMetrics:
             if hasattr(base_tv, 'get_annotation_only'):
                 img_id, w, h, boxes, labels = base_tv.get_annotation_only(idx)
             else:
-                # Fallback: full image load (slow)
                 img, target = torchvision_dataset[idx]
                 img_id = int(target["image_id"].item())
                 h, w = img.shape[0], img.shape[1]
@@ -397,9 +383,7 @@ class ApplyAlbumentations(torch.utils.data.Dataset):
         target["area"] = ((target["boxes"][:, 2] - target["boxes"][:, 0]).clamp(min=0) * (target["boxes"][:, 3] - target["boxes"][:, 1]).clamp(min=0)) if target["boxes"].numel() else torch.zeros((0,), dtype=torch.float32)
         return img, target
 
-# ===========================================================================
 # Augmentation Strategies
-# ===========================================================================
 def get_transforms(is_train: bool = True, aug_strategy: str = "base") -> A.Compose:
     bbox_params = A.BboxParams(format="pascal_voc", label_fields=["class_labels"], clip=True, min_area=1, min_visibility=0.1)
     
@@ -463,7 +447,7 @@ def setup_data(exp: Exp) -> Data:
         base_train = datasets.DEART(root, split=train_split, ann_source="xml", seed=seed, split_ratio=split_ratio)
         base_val   = datasets.DEART(root, split=val_split, ann_source="xml", seed=seed, split_ratio=split_ratio)
         classes    = ["Background", "Car", "Pedestrian"] # Keep same classes to load KITTI weights
-        label_remap = {1: 2} # Trick DEART Human (1) into DETR Pedestrian (2)
+        label_remap = {1: 2} # DEART Human (1) into DETR Pedestrian (2)
         model_to_coco_mapping = {2: 1} # Evaluate DETR Pedestrian (2) as COCO Person (1)
     else:
         raise ValueError(f"Unknown dataset '{dataset_name}'")
@@ -475,7 +459,6 @@ def setup_data(exp: Exp) -> Data:
     train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=cfg["training"].get("val_batch_size", 4), shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
-    # classes = ["Background", "Car", "Pedestrian"]
     train_coco_metrics = MemoryMetrics(train_ds, model_to_coco_mapping)
     val_coco_metrics   = MemoryMetrics(val_ds, model_to_coco_mapping)
 

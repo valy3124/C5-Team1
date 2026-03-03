@@ -228,7 +228,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     for epoch in tqdm(range(num_epochs), desc="Epochs", mininterval=60, ascii=True):
         if exp.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(exp.device)
-        # ---- Training pass ----
+        #  Training pass 
         run.model.train()
         train_loss_sum = 0.0
 
@@ -264,7 +264,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         train_loss = train_loss_sum / max(1, len(data.train_loader))
 
-        # ---- Validation loss pass ----
+        # Validation loss pass
         run.model.eval() 
         val_loss_sum = 0.0
 
@@ -290,7 +290,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         val_loss = val_loss_sum / max(1, len(data.val_loader))
 
-        # ---- Logging and Checkpointing ----
+        # Logging and Checkpointing 
         eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics)
         val_map = eval_result.metrics["overall/AP"]
 
