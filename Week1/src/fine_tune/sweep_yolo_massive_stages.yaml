@@ -1,28 +1,22 @@
 program: src.fine_tune.fine_tune_yolo
 project: "YOLO_FineTune_Massive_Stages"
-method: bayes
+method: grid
 metric:
   name: val_coco_ap
   goal: maximize
 parameters:
   epochs_head:
-    values: [5, 10]
+    values: [5]
   lr_head:
-    distribution: log_uniform_values
-    min: 0.00005
-    max: 0.005
+    values: [0.000054885135064454]
   epochs_neck:
-    values: [5, 10, 15]
+    values: [5]
   lr_neck:
-    distribution: log_uniform_values
-    min: 0.0000005
-    max: 0.00005
+    values: [0.00001684189913387262]
   epochs_backbone:
-    values: [0, 5, 10]
+    values: [0]
   lr_backbone:
-    distribution: log_uniform_values
-    min: 0.0000005
-    max: 0.00005
+    values: [0.0000005]
 command:
   - ${env}
   - ${interpreter}

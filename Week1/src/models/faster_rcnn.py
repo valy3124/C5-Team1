@@ -39,7 +39,7 @@ class FasterRCNNModel(torch.nn.Module):
         conf: float = 0.25,
         iou: float = 0.7,
         device: str = "cuda:0",
-        half: bool = True
+        half: bool = False
     ) -> None:
         super().__init__()
         self.conf = conf
@@ -137,34 +137,23 @@ class FasterRCNNModel(torch.nn.Module):
         return self.model(images, targets)
 
     @torch.no_grad()
-    def predict(self, images: Union[Image.Image, List[Image.Image], torch.Tensor, List[torch.Tensor]]) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    def predict(self, images: Union[Image.Image, List[Image.Image], torch.Tensor, List[torch.Tensor]]) -> tuple[Union[Dict[str, Any], List[Dict[str, Any]]], float]:
         """
-        Run inference on a single image or a list of images
-
-        Args
-        -----
-        images : PIL.Image.Image, List[PIL.Image.Image], torch.Tensor, or List[torch.Tensor]
-            Input RGB image(s) or tensor(s)
-
-        Returns
-        -----
-        Dict[str, Any]
-            {
-                "bboxes_xyxy": np.ndarray (N,4),
-                "scores": np.ndarray (N,),
-                "category_ids": np.ndarray (N,),
-            }
+        Run inference on a single image or a list of images and return End-to-End time.
         """
+        import time
+
         single_input = False
         if isinstance(images, (Image.Image, torch.Tensor)):
             images = [images]
             single_input = True
 
-        # Preserve original training state
         was_training = self.model.training
         self.model.eval()
 
-        inference_time = self._benchmark_inference_time(images)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
 
         try:
             tensors = []
@@ -172,9 +161,10 @@ class FasterRCNNModel(torch.nn.Module):
                 if isinstance(img, torch.Tensor):
                     tensors.append(img.to(self.device))
                 else:
+                    from torchvision.transforms.functional import to_tensor
                     tensors.append(to_tensor(img).to(self.device))
-
             if self.half:
+                tensors = [t.half() for t in tensors]
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     results = self.model(tensors)
             else:
@@ -183,6 +173,12 @@ class FasterRCNNModel(torch.nn.Module):
         finally:
             if was_training:
                 self.model.train()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        end_time = time.perf_counter()
+
+        avg_inference_time_sec = (end_time - start_time) / len(images)
 
         outputs = []
         for result in results:
@@ -193,67 +189,6 @@ class FasterRCNNModel(torch.nn.Module):
             })
 
         if single_input:
-            return outputs[0], inference_time
+            return outputs[0], avg_inference_time_sec
 
-        return outputs, inference_time
-
-    def _benchmark_inference_time(self, sample_input: Any) -> float:
-        """
-        Calculates theoretical inference time using the actual first input tensor with warmup.
-        Returns average inference time per frame in seconds.
-        """
-        if hasattr(self, "_cached_inference_time"):
-            return self._cached_inference_time
-
-        import time
-        import torch
-        
-        was_training = self.model.training
-        self.model.eval()
-
-        if isinstance(sample_input, list):
-            sample_img = sample_input[0]
-        else:
-            sample_img = sample_input
-            
-        from torchvision.transforms.functional import to_tensor
-        if not isinstance(sample_img, torch.Tensor):
-            sample_tensor = to_tensor(sample_img).to(self.device)
-        else:
-            sample_tensor = sample_img.to(self.device)
-            
-        dummy_input = [sample_tensor]
-        if self.half:
-            dummy_input = [img.half() for img in dummy_input]
-
-        try:
-            with torch.no_grad():
-                # Warmup
-                for _ in range(20):
-                    if self.half:
-                        with torch.autocast(device_type="cuda", dtype=torch.float16):
-                            _ = self.model(dummy_input)
-                    else:
-                        _ = self.model(dummy_input)
-
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                start = time.perf_counter()
-
-                # Benchmark
-                for _ in range(100):
-                    if self.half:
-                        with torch.autocast(device_type="cuda", dtype=torch.float16):
-                            _ = self.model(dummy_input)
-                    else:
-                        _ = self.model(dummy_input)
-
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                end = time.perf_counter()
-                
-            self._cached_inference_time = (end - start) / 100.0
-            return self._cached_inference_time
-        finally:
-            if was_training:
-                self.model.train()
+        return outputs, avg_inference_time_sec

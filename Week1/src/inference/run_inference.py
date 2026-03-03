@@ -29,6 +29,7 @@ from src.datasets import KITTIMOTS
 from src.models.yolo import UltralyticsYOLO
 from src.models.detr import HuggingFaceDETR 
 from src.models.faster_rcnn import FasterRCNNModel
+from src.models.rt_detr import HuggingFaceRTDETR
 
 from src.inference.evaluation import CocoMetrics
 
@@ -101,6 +102,14 @@ def build_model(args: argparse.Namespace) -> Any:
     
     elif name == "faster_rcnn":
         return FasterRCNNModel(
+            weights=args.weights,
+            conf=args.conf,
+            device=args.device,
+            half=args.half
+        )
+    
+    elif name == "rt_detr":
+        return HuggingFaceRTDETR(
             weights=args.weights,
             conf=args.conf,
             device=args.device,

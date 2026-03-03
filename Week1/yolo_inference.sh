@@ -8,8 +8,8 @@
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00
 
-WEIGHTS=("yolo26l.pt")
-NAMES=("yolo_v26_l_baseline")
+WEIGHTS=("yolov10b.pt")
+NAMES=("yolo_v10_b")
 
 python -m src.inference.run_inference \
   --model yolo \

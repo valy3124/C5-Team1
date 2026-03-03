@@ -4,7 +4,7 @@ experiment_name: "yolo_sweep"
 
 data:
   root: "/ghome/group01/mcv/datasets/C5/KITTI-MOTS/"
-  mode: "search"
+  mode: "full"
   seed: 42
   split_ratio: 0.8
 
