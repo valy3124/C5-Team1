@@ -1,5 +1,5 @@
 program: src.fine_tune.fine_tune_yolo
-project: "YOLO_FineTune_Sweep"
+project: "YOLO_FineTune_Sweep_augs"
 method: grid
 metric:
   name: val_coco_ap
@@ -8,9 +8,11 @@ parameters:
   epochs:
     value: 25
   freeze:
-    values: [10, 22]
+    values: [22]
   lr:
     values: [0.00001]
+  aug_strategy:
+    values: ["composite_only"]
 command:
   - ${env}
   - ${interpreter}

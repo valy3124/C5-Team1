@@ -123,6 +123,18 @@ def get_augmentation_profile(strategy: str) -> Dict[str, float]:
             "degrees": 0.0, "translate": 0.0, "scale": 0.0, "shear": 0.0,
             "perspective": 0.0, "flipud": 0.0, "fliplr": 0.0,
             "mosaic": 0.0, "mixup": 0.0, "copy_paste": 0.0
+        },
+        "geometry_only": { 
+            "hsv_h": 0.0, "hsv_s": 0.0, "hsv_v": 0.0,
+            "degrees": 10.0, "translate": 0.1, "scale": 0.5, "shear": 0.0,
+            "perspective": 0.0, "flipud": 0.0, "fliplr": 0.5,
+            "mosaic": 0.0, "mixup": 0.0, "copy_paste": 0.0
+        },
+        "composite_only": { 
+            "hsv_h": 0.0, "hsv_s": 0.0, "hsv_v": 0.0,
+            "degrees": 0.0, "translate": 0.0, "scale": 0.0, "shear": 0.0,
+            "perspective": 0.0, "flipud": 0.0, "fliplr": 0.0,
+            "mosaic": 1.0, "mixup": 0.2, "copy_paste": 0.0
         }
     }
     
@@ -210,6 +222,28 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
     if args.freeze is not None: training["freeze"] = int(args.freeze)
     if args.aug_strategy is not None: training["aug_strategy"] = str(args.aug_strategy)
 
+    #--------
+    # Dynamic Stages for Sweep
+    if getattr(args, "epochs_head", 0) > 0 or getattr(args, "epochs_neck", 0) > 0 or getattr(args, "epochs_backbone", 0) > 0:
+        dynamic_stages = []
+        if getattr(args, "epochs_head", 0) > 0:
+            dynamic_stages.append({
+                "name": "head_only", "epochs": args.epochs_head, 
+                "lr": getattr(args, "lr_head", 0.001), "freeze": 22
+            })
+        if getattr(args, "epochs_neck", 0) > 0:
+            dynamic_stages.append({
+                "name": "neck_head", "epochs": args.epochs_neck, 
+                "lr": getattr(args, "lr_neck", 0.0001), "freeze": 10
+            })
+        if getattr(args, "epochs_backbone", 0) > 0:
+            dynamic_stages.append({
+                "name": "full_ft", "epochs": args.epochs_backbone, 
+                "lr": getattr(args, "lr_backbone", 0.00001), "freeze": 0
+            })
+        if dynamic_stages:
+            training["stages"] = dynamic_stages
+    #--------
     cfg.setdefault("data", {})
     cfg["data"]["mode"] = args.mode or cfg["data"].get("mode", "full")
     cfg["data"]["seed"] = args.seed or cfg["data"].get("seed", 42)
@@ -283,7 +317,7 @@ def setup_model(exp: Exp) -> Run:
     if cfg["model"].get("name", "yolo") != "yolo":
         raise ValueError("This script only supports 'yolo'.")
 
-    device_str = str(exp.device.index) if exp.device.type == "cuda" else "cpu"
+    device_str = "0" if exp.device.type == "cuda" else "cpu"
     wrapper = UltralyticsYOLO(
         weights=cfg["model"].get("weights", "yolov10b.pt"),
         conf=cfg["training"].get("conf", 0),
@@ -312,7 +346,7 @@ def evaluate(exp: Exp, run: Run, data: Data, use_val: bool = True) -> Eval:
     for start in tqdm(range(0, len(raw_ds), batch_size), desc="COCO eval", ascii=True):
         batch = [raw_ds[i] for i in range(start, min(start + batch_size, len(raw_ds)))]
         pil_imgs = [item[0] for item in batch]
-        preds = model.predict(pil_imgs)
+        preds, _ = model.predict(pil_imgs)
 
         for pred, (_, _, meta) in zip(preds, batch):
             image_id = int(meta.get("index", start))
@@ -346,7 +380,8 @@ def log_predictions_to_wandb(exp: Exp, run: Run, data: Data, epoch: int, max_ima
 
     for idx in indices:
         img_pil, raw_anns, _ = raw_ds[idx]
-        pred = run.model.predict([img_pil])[0]
+        pred_list, _ = run.model.predict([img_pil])
+        pred = pred_list[0]
 
         wandb_pred = [{
             "position": {"minX": float(b[0]), "minY": float(b[1]), "maxX": float(b[2]), "maxY": float(b[3])},
@@ -441,7 +476,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             print("Warning: last.pt not found, using current run.model (may break training)")
             temp_model = run.model
         else:
-            device_str = str(exp.device.index) if exp.device.type == "cuda" else "cpu"
+            device_str = "0" if exp.device.type == "cuda" else "cpu"
             temp_model = UltralyticsYOLO(
                 weights=str(ul_last), conf=run.model.conf, iou=run.model.iou, device=device_str, map_coco=False
             )
@@ -455,7 +490,6 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         print(f"Stage '{state['stage_name']}' | Epoch {local_epoch}/{state['num_epochs']} (Global {global_epoch}) | COCO AP: {val_map_coco:.4f}")
 
-        # Lógica de Checkpoints
         if val_map_coco > state["best_map_stage"]:
             state["best_map_stage"] = val_map_coco
             state["best_epoch_stage"] = local_epoch
@@ -532,7 +566,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             epochs=state["num_epochs"],
             batch=batch_size,
             imgsz=imgsz,
-            device=str(exp.device.index) if exp.device.type == "cuda" else "cpu",
+            device="0" if exp.device.type == "cuda" else "cpu",
             lr0=lr,
             cos_lr=True,
             optimizer="AdamW",
@@ -559,7 +593,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
             if ul_best.is_file():
                 print(f"Cargando los mejores pesos de {state['stage_name']} desde {ul_best} para la siguiente etapa...")
-                device_str = str(exp.device.index) if exp.device.type == "cuda" else "cpu"
+                device_str = "0" if exp.device.type == "cuda" else "cpu"
                 run.model = UltralyticsYOLO(
                     weights=str(ul_best),
                     conf=run.model.conf, 
@@ -600,7 +634,16 @@ if __name__ == "__main__":
     parser.add_argument("--freeze", type=int, help="Number of layers to freeze. 0=full training, 22=freeze backbone+neck, etc.")
     parser.add_argument(
         "--aug_strategy", type=str, 
-        choices=["none", "base", "heavy", "color_only"], 
+        choices=["none", "base", "heavy", "color_only", "geometry_only", "composite_only"], 
         help="Select an intrinsic Ultralytics augmentation profile."
     )
+    
+    # Sweep stage overrides
+    parser.add_argument("--epochs_head", type=int, default=0, help="Sweep: epochs for head-only stage (freeze 22).")
+    parser.add_argument("--lr_head", type=float, default=0.001, help="Sweep: lr for head-only stage.")
+    parser.add_argument("--epochs_neck", type=int, default=0, help="Sweep: epochs for neck+head stage (freeze 10).")
+    parser.add_argument("--lr_neck", type=float, default=0.0001, help="Sweep: lr for neck+head stage.")
+    parser.add_argument("--epochs_backbone", type=int, default=0, help="Sweep: epochs for full finetune (freeze 0).")
+    parser.add_argument("--lr_backbone", type=float, default=0.00001, help="Sweep: lr for full finetune stage.")
+    
     main(parser.parse_args())
