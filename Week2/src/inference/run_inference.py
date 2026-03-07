@@ -75,13 +75,41 @@ def draw_pred_masks(image: Image.Image, masks_np: list) -> Image.Image:
     )
     return vis_overlay
 
-def create_3pane_image(gt_img: Image.Image, prompt_img: Image.Image, pred_img: Image.Image) -> Image.Image:
-    """Concatenates GT, Prompt, and Prediction images horizontally."""
+def create_3pane_vertical(gt_img, prompt_img, pred_img):
+    """Concatenates GT, Prompt, and Prediction images vertically with titles."""
+    from PIL import Image, ImageDraw, ImageFont
+    
+    titles = ["Ground Truth", "Prompt", "Prediction"]
+    images = [gt_img, prompt_img, pred_img]
+    
     w, h = gt_img.size
-    pane = Image.new('RGB', (w * 3, h))
-    pane.paste(gt_img, (0, 0))
-    pane.paste(prompt_img, (w, 0))
-    pane.paste(pred_img, (w * 2, 0))
+    
+    title_h = 40
+    total_h = (h + title_h) * 3
+    
+    pane = Image.new("RGB", (w, total_h), "white")
+    draw = ImageDraw.Draw(pane)
+    
+    # Font normal
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+    except:
+        font = ImageFont.load_default()
+    
+    for i, (img, title) in enumerate(zip(images, titles)):
+        y_offset = i * (h + title_h)
+        
+        bbox = draw.textbbox((0, 0), title, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        
+        text_x = (w - text_w) // 2
+        text_y = y_offset + (title_h - text_h) // 2
+        
+        draw.text((text_x, text_y), title, fill="black", font=font)
+        
+        pane.paste(img, (0, y_offset + title_h))
+    
     return pane
 
 def build_model(args: argparse.Namespace) -> Any:
@@ -153,7 +181,7 @@ def run_inference(
         area_metrics = []
         frag_metrics = []
         
-        if len(scores_out.shape) == 1:
+        if len(scores_out.shape) == 1: # Single prompt (shape [3])
             best_idx = torch.argmax(scores_out)
             b_mask = masks_out[best_idx].cpu().numpy()
             b_score = scores_out[best_idx].item()
@@ -163,22 +191,35 @@ def run_inference(
             area_metrics.append(np.sum(b_mask))
             frag_metrics.append(get_connected_components(b_mask))
         else:
-            for j in range(scores_out.shape[0]):
-                best_idx = torch.argmax(scores_out[j])
-                b_mask = masks_out[j, best_idx].cpu().numpy()
-                b_score = scores_out[j, best_idx].item()
+            if len(masks_out.shape) == 3:
+                if len(scores_out.shape) == 2:
+                    scores_out = scores_out.squeeze(0)
+                    
+                best_idx = torch.argmax(scores_out)
+                b_mask = masks_out[best_idx].cpu().numpy()
+                b_score = scores_out[best_idx].item()
                 best_masks.append(b_mask)
                 best_scores.append(b_score)
-                
                 area_metrics.append(np.sum(b_mask))
                 frag_metrics.append(get_connected_components(b_mask))
+                
+            else:
+                for j in range(scores_out.shape[0]):
+                    best_idx = torch.argmax(scores_out[j])
+                    b_mask = masks_out[j, best_idx].cpu().numpy()
+                    b_score = scores_out[j, best_idx].item()
+                    best_masks.append(b_mask)
+                    best_scores.append(b_score)
+                    
+                    area_metrics.append(np.sum(b_mask))
+                    frag_metrics.append(get_connected_components(b_mask))
                 
         # Visualization
         gt_img = draw_gt_masks(image, anns)
         prompt_img = draw_prompts(image, prompt_data)
         pred_img = draw_pred_masks(image, best_masks)
         
-        pane_img = create_3pane_image(gt_img, prompt_img, pred_img)
+        pane_img = create_3pane_vertical(gt_img, prompt_img, pred_img)
         
         img_filename = f"{i:04d}_seq{meta['seq']}_frame{meta['frame']}.png"
         pane_img.save(out_path / img_filename)

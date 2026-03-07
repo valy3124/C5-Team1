@@ -3,10 +3,7 @@ import cv2
 from typing import Any, Dict, List
 import PIL.Image as Image
 
-from .base_strategy import BasePromptStrategy
-
-
-class SiftPromptStrategy(BasePromptStrategy):
+class SiftPromptStrategy:
     """
     Uses SIFT keypoints extracted from the entire image as point prompts for SAM.
     """

@@ -2,10 +2,7 @@ import numpy as np
 from typing import Any, Dict, List
 import PIL.Image as Image
 
-from .base_strategy import BasePromptStrategy
-
-
-class GridPromptStrategy(BasePromptStrategy):
+class GridPromptStrategy:
     """
     Generates a uniform grid of point prompts for SAM over the entire image.
     No bounding boxes or annotations are used.
