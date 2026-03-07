@@ -35,9 +35,11 @@ class SamWrapper:
         start_time = time.time()
         
         prompt_type = prompt_dict.get("type")
-        if prompt_type == "point":
-            input_points = [[prompt_dict["points"].tolist()]]
-            input_labels = [[prompt_dict["point_labels"].tolist()]]
+        if prompt_type in ["point", "point_and_box"]:
+            points_list = prompt_dict["points"].tolist()
+            labels_list = prompt_dict["point_labels"].tolist()
+            input_points = [[[pt] for pt in points_list]]
+            input_labels = [[[lb] for lb in labels_list]]
             
             inputs = self.processor(
                 image, 
@@ -47,7 +49,7 @@ class SamWrapper:
             ).to(self.device)
             
         elif prompt_type == "box":
-            input_boxes = [[[prompt_dict["boxes"].tolist()]]]
+            input_boxes = [[[box.tolist()]] for box in prompt_dict["boxes"]]
             inputs = self.processor(
                 image, 
                 input_boxes=input_boxes, 

@@ -11,5 +11,4 @@
 python -m src.inference.run_inference \
     --model sam \
     --prompt grid \
-    --exp_name sam_grid_validation \
-    --log_tables
+    --exp_name sam_grid_validation
