@@ -120,10 +120,10 @@ def plot_overall_bar(data, mode="all"):
 
     plt.figure(figsize=(fig_width, 6))
 
-    plt.title("Overall AP and AR Comparison", fontsize=20, fontweight="bold", pad=35)
+    plt.title("mAP and mAR Comparison", fontsize=20, fontweight="bold", pad=35)
 
-    bars1 = plt.bar(x - width/2, overall_ap, width, label="Overall AP", color=color_ap)
-    bars2 = plt.bar(x + width/2, overall_ar, width, label="Overall AR", color=color_ar)
+    bars1 = plt.bar(x - width/2, overall_ap, width, label="mAP", color=color_ap)
+    bars2 = plt.bar(x + width/2, overall_ar, width, label="mAR", color=color_ar)
 
     plt.xticks(x, formatted_models, rotation=45, ha='right', fontsize=12)
     plt.yticks(fontsize=14)
@@ -238,32 +238,46 @@ def plot_overall_heatmap(data, mode="all"):
     data_array = np.array(matrix)
     
     if mode == "final" or len(models) <= 2:
-        fig_height = 2.5
+        is_vertical = True
+        data_array = data_array.T
+        fig_width = max(4, len(models) * 1.5)
+        fig_height = 6
         title_fs = 18
         tick_fs = 14
         text_fs = 14
         cbar_fs = 14
     else:
+        is_vertical = False
+        fig_width = 10
         fig_height = max(4.5, len(models) * 0.5 + 2)
         title_fs = 14
         tick_fs = 10
         text_fs = 10
         cbar_fs = 10
 
-    fig, ax = plt.subplots(figsize=(10, fig_height))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
     im = ax.imshow(data_array, cmap="RdYlGn", aspect="auto", vmin=0, vmax=100)
 
-    ax.set_title("Overall AP and AR Comparison by Object Size", fontsize=title_fs, fontweight="bold", pad=15)
+    ax.set_title("mAP and mAR by Object Size", fontsize=title_fs, fontweight="bold", pad=15)
 
-    ax.set_xticks(np.arange(6))
-    ax.set_yticks(np.arange(len(models)))
+    if is_vertical:
+        ax.set_xticks(np.arange(len(models)))
+        ax.set_yticks(np.arange(6))
+        ax.set_xticklabels(models, fontsize=tick_fs, rotation=45, ha='right')
+        ax.set_yticklabels([
+            "AP_S (Small)", "AP_M (Medium)", "AP_L (Large)",
+            "AR_S (Small)", "AR_M (Medium)", "AR_L (Large)"
+        ], fontsize=tick_fs)
+    else:
+        ax.set_xticks(np.arange(6))
+        ax.set_yticks(np.arange(len(models)))
+        ax.set_xticklabels([
+            "AP_S\n(Small)", "AP_M\n(Medium)", "AP_L\n(Large)",
+            "AR_S\n(Small)", "AR_M\n(Medium)", "AR_L\n(Large)"
+        ], fontsize=tick_fs)
+        ax.set_yticklabels(models, fontsize=tick_fs)
 
-    ax.set_xticklabels([
-        "AP_S\n(Small)", "AP_M\n(Medium)", "AP_L\n(Large)",
-        "AR_S\n(Small)", "AR_M\n(Medium)", "AR_L\n(Large)"
-    ], fontsize=tick_fs)
-    ax.set_yticklabels(models, fontsize=tick_fs)
     ax.grid(False) 
 
     for i in range(data_array.shape[0]):
