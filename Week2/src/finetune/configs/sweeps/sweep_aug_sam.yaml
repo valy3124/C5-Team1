@@ -1,0 +1,28 @@
+program: src/finetune/sam_finetune.py
+project: "Week2-SAM-finetuning"
+method: grid
+metric:
+  name: val_overall/AP_segm
+  goal: maximize
+parameters:
+  # Sweep over the new aggressive augmentation groups natively injected into the prompt processor pipeline
+  aug_strategy:
+    values: ["no_aug", "base", "legacy", "geometric", "color_jitter", "extreme_weather", "heavy_corruption", "limit_test"]
+    
+  # Fixed architecture baseline
+  name_fields:
+    value: "aug_strategy"
+  epochs:
+    value: 15
+  lr:
+    value: 0.00005
+  gradient_clipping:
+    value: 1.0
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "src/finetune/configs/config_sam_base.yaml"
+  - ${args}

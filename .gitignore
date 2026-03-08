@@ -9,7 +9,9 @@ Week1/src/results/
 Week1/results/
 Week1/runs/
 Week1/src/DEArt/
-Week2/results_inference/
+Week2/src/results_inference/
+Week2/results_finetune/
+Week2/logs_sweeps/
 *.jsonl
 *.log
 *.out
