@@ -9,6 +9,7 @@
 
 
 python -m src.inference.run_inference \
-    --model sam \
-    --prompt grid \
-    --exp_name sam_grid_validation
+    --model grounded_sam \
+    --prompt text \
+    --exp_name grounded_sam_text_validation_attributes \
+    --text_labels "red car ."

@@ -16,14 +16,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from datasets import KITTIMOTS
 from models.sam_wrapper import SamWrapper
+from models.grounded_sam import GroundedSamWrapper
 from prompting.grid import GridPromptStrategy
 from prompting.sift import SiftPromptStrategy
 from prompting.center_bb_gt import CenterBBGTPromptStrategy
+from prompting.text import TextPromptStrategy
 import pycocotools.mask as rletools
 
 def get_connected_components(mask: np.ndarray) -> int:
     """Calculates the number of connected components in a binary mask (fragmentation)."""
-    # Ensure mask is integer format for scipy label
     labeled_array, num_features = label(mask.astype(int))
     return num_features
 
@@ -36,8 +37,41 @@ def get_prompt_count(prompt_data: dict) -> int:
         return len(prompt_data.get("boxes", []))
     return 1
 
+def mask_nms(masks: list, scores: list, iou_threshold: float = 0.8):
+    """
+    Applies Non-Maximum Suppression (NMS) to predicted masks based on IoU.
+    Discards overlapping masks, keeping the one with the highest confidence score.
+    """
+    if not masks:
+        return [], []
+
+    indices = np.argsort(scores)[::-1]
+    
+    keep_masks = []
+    keep_scores = []
+    
+    for idx in indices:
+        current_mask = masks[idx] > 0
+        current_score = scores[idx]
+        
+        is_duplicate = False
+        for kept_mask in keep_masks:
+            intersection = np.logical_and(current_mask, kept_mask).sum()
+            union = np.logical_or(current_mask, kept_mask).sum()
+            
+            iou = intersection / union if union > 0 else 0
+            
+            if iou > iou_threshold:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            keep_masks.append(current_mask)
+            keep_scores.append(current_score)
+            
+    return keep_masks, keep_scores
+
 def draw_prompts(image: Image.Image, prompt_data: dict) -> Image.Image:
-    """Draws prompts (points, boxes) onto a copy of the image."""
     vis = image.copy()
     draw = ImageDraw.Draw(vis)
     
@@ -66,13 +100,12 @@ def draw_prompts(image: Image.Image, prompt_data: dict) -> Image.Image:
     return vis
 
 def draw_gt_masks(image: Image.Image, anns: list) -> Image.Image:
-    """Draws Ground Truth masks on the image."""
     vis = image.copy()
     overlay = np.array(vis).copy()
     
-    for ann in anns:
+    for idx, ann in enumerate(anns):
         mask = rletools.decode(ann.mask_rle).astype(np.uint8)
-        color = np.random.randint(0, 255, size=(3,), dtype=np.uint8)
+        color = np.array(_MASK_PALETTE[idx % len(_MASK_PALETTE)], dtype=np.uint8)
         overlay[mask == 1] = color
         
     vis_overlay = Image.fromarray(
@@ -93,27 +126,37 @@ _MASK_PALETTE = [
     (255, 255, 100),  # lime yellow
 ]
 
-def draw_pred_masks(image: Image.Image, masks_np: list) -> Image.Image:
-    """Draws predicted masks on the image using a high-contrast color palette."""
+def draw_pred_masks(image: Image.Image, masks_np: list, scores_np: list) -> Image.Image:
+    """
+    Draws predicted masks using strict pixel assignment.
+    Prioritizes high-confidence masks so lower-confidence masks don't overwrite them.
+    """
     vis = image.copy()
     overlay = np.array(vis).copy()
     
-    for idx, mask in enumerate(masks_np):
-        binary_mask = mask > 0
-        if not binary_mask.any():
+    if not masks_np:
+        return vis
+
+    sorted_indices = np.argsort(scores_np)[::-1]
+    assigned_pixels = np.zeros(overlay.shape[:2], dtype=bool)
+    
+    for color_idx, mask_idx in enumerate(sorted_indices):
+        mask = masks_np[mask_idx] > 0
+        valid_mask = np.logical_and(mask, ~assigned_pixels)
+        
+        if not valid_mask.any():
             continue
+            
+        color = np.array(_MASK_PALETTE[color_idx % len(_MASK_PALETTE)], dtype=np.uint8)
+        overlay[valid_mask] = color
+        assigned_pixels = np.logical_or(assigned_pixels, valid_mask)
         
-        color = np.array(_MASK_PALETTE[idx % len(_MASK_PALETTE)], dtype=np.uint8)
-        overlay[binary_mask] = color
-        
-    # Blend with a stronger mask presence so it's clearly visible
     vis_overlay = Image.fromarray(
         (0.45 * np.array(vis) + 0.55 * overlay).astype(np.uint8)
     )
     return vis_overlay
 
 def create_3pane_vertical(gt_img: Image.Image, prompt_img: Image.Image, pred_img: Image.Image) -> Image.Image:
-    """Concatenates GT, Prompt, and Prediction images vertically with titles."""
     titles = ["Ground Truth", "Prompt", "Prediction"]
     images = [gt_img, prompt_img, pred_img]
     
@@ -149,6 +192,20 @@ def build_model(args: argparse.Namespace) -> Any:
     if name == "sam":
         model_id = args.weights if args.weights else "facebook/sam-vit-base"
         return SamWrapper(model_id=model_id, device=args.device)
+    elif name == "grounded_sam":
+        dino_id = "IDEA-Research/grounding-dino-tiny"
+        sam_id  = "facebook/sam-vit-base"
+        if args.weights:
+            parts = args.weights.split("|")
+            dino_id = parts[0].strip()
+            if len(parts) > 1:
+                sam_id = parts[1].strip()
+        return GroundedSamWrapper(
+            dino_model_id=dino_id,
+            sam_model_id=sam_id,
+            box_threshold=args.conf if args.conf > 0 else 0.70,
+            device=args.device,
+        )
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
@@ -160,6 +217,8 @@ def build_prompt_strategy(args: argparse.Namespace) -> Any:
         return SiftPromptStrategy()
     elif name == "center_bb_gt":
         return CenterBBGTPromptStrategy()
+    elif name == "text":
+        return TextPromptStrategy(text_labels=args.text_labels)
     else:
         raise ValueError(f"Unknown prompt strategy: {args.prompt}")
 
@@ -172,12 +231,13 @@ def run_inference(
     prompt_strategy: str,
     model: Any,
     strategy: Any,
+    exp_name: str = "default_experiment",
     limit: Optional[int] = None
 ) -> None:
     
     ds = KITTIMOTS(root=root, split=split, ann_source=ann_source, compute_boxes=True)
     
-    run_name = f"{model_name}_{prompt_strategy}_inference"
+    run_name = exp_name if exp_name != "default_experiment" else f"{model_name}_{prompt_strategy}_inference"
     out_path = Path(output_dir) / run_name
     out_path.mkdir(parents=True, exist_ok=True)
     
@@ -190,7 +250,6 @@ def run_inference(
     total_inference_time = 0.0
     total_latency_start = time.time()
     
-    # Global metrics aggregation
     global_image_ids = []
     global_num_bbs = []
     global_confidences = []
@@ -203,7 +262,6 @@ def run_inference(
         for i in tqdm(range(n), desc="Processing Frames"):
             image, anns, meta = ds[i]
             
-            # Generate Prompt
             prompt_data = strategy.generate_prompt(image, anns)
             num_prompts = get_prompt_count(prompt_data)
             
@@ -212,7 +270,6 @@ def run_inference(
                 
             total_prompts_sent += num_prompts
             
-            # Predict
             masks_tensors, scores_tensors, inference_time = model.predict(image, prompt_data)
             total_inference_time += inference_time
             
@@ -223,16 +280,21 @@ def run_inference(
             if scores_out.dim() == 3:
                 scores_out = scores_out.squeeze(0)
             
-            best_masks = []
+            raw_masks = []
+            raw_scores = []
             
-            # Iterate over N objects; for each pick the best of the 3 SAM candidates
             n_objects = scores_out.shape[0]
             for j in range(n_objects):
                 best_idx = torch.argmax(scores_out[j])
                 b_mask  = masks_out[j, best_idx].cpu().numpy()
                 b_score = scores_out[j, best_idx].item()
                 
-                best_masks.append(b_mask)
+                raw_masks.append(b_mask)
+                raw_scores.append(b_score)
+                
+            best_masks, best_scores = mask_nms(raw_masks, raw_scores, iou_threshold=0.8)
+            
+            for b_mask, b_score in zip(best_masks, best_scores):
                 global_image_ids.append(meta['image_path'].split('/')[-1])
                 global_num_bbs.append(num_prompts)
                 global_confidences.append(b_score)
@@ -244,35 +306,30 @@ def run_inference(
             
             total_masks_predicted += len(best_masks)
             
-            # Visualization
             if i % 20 == 0:
                 gt_img = draw_gt_masks(image, anns)
                 prompt_img = draw_prompts(image, prompt_data)
-                pred_img = draw_pred_masks(image, best_masks)
+                
+                pred_img = draw_pred_masks(image, best_masks, best_scores)
                 
                 pane_img = create_3pane_vertical(gt_img, prompt_img, pred_img)
                 img_filename = f"{i:04d}_seq{meta['seq']}_frame{meta['frame']}.png"
                 pane_img.save(out_path / img_filename)
             
-    # Calculate Final Aggregated Metrics
     total_latency = time.time() - total_latency_start
     avg_time = total_inference_time / n if n > 0 else 0
     fps = 1.0 / avg_time if avg_time > 0 else 0
     
     max_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0
     
-    # Log everything to WandB at once
     wandb.log({
-        # Quality Metrics
         "metrics/avg_confidence": np.mean(global_confidences) if global_confidences else 0,
         "metrics/avg_mask_area_px": np.mean(global_areas) if global_areas else 0,
         "metrics/avg_fragmentation": np.mean(global_fragmentations) if global_fragmentations else 0,
         
-        # Quantity Metrics
         "metrics/total_prompts_sent": total_prompts_sent,
         "metrics/total_masks_predicted": total_masks_predicted,
         
-        # Performance Metrics
         "performance/avg_latency_ms": avg_time * 1000,
         "performance/fps": fps,
         "performance/total_inference_time_s": total_inference_time,
@@ -280,7 +337,6 @@ def run_inference(
         "performance/max_vram_mb": max_vram_mb
     })
     
-    # Export metrics to CSV
     csv_path = out_path / "mask_metrics.csv"
     df_metrics = pd.DataFrame({
         "image_id": global_image_ids,
@@ -295,7 +351,6 @@ def run_inference(
     print(f"Finished. Total Latency: {total_latency:.2f}s | FPS: {fps:.2f}")
     print(f"Saved predictions to {out_path}")
     print(f"Saved mask metrics to {csv_path}")
-    
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run inference on KITTI-MOTS dataset")
@@ -316,9 +371,9 @@ def parse_args():
     parser.add_argument("--half", action="store_true", help="Use FP16")
     
     parser.add_argument("--prompt", type=str, default="sift", choices=["grid", "sift", "bbox", "text", "center_bb_gt"], help="Prompt strategy.")
+    parser.add_argument("--text_labels", type=str, default="pedestrian. car.", help="Period-separated class labels for text prompt strategy (Grounded SAM).")
     
     return parser.parse_args()
-
 
 if __name__ == "__main__":
     args = parse_args()
@@ -360,6 +415,7 @@ if __name__ == "__main__":
         prompt_strategy=args.prompt,
         model=model,
         strategy=strategy,
+        exp_name=run_exp_name,
         limit=args.limit
     )
 

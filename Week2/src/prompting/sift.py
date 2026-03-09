@@ -19,7 +19,7 @@ class SiftPromptStrategy:
             keypoints = sorted(keypoints, key=lambda kp: -kp.response)
 
             # Limit number of points
-            max_points = kwargs.get("max_points", 20)
+            max_points = kwargs.get("max_points", 60)
             keypoints = keypoints[:max_points]
             points = np.array([kp.pt for kp in keypoints], dtype=np.float32)
 
