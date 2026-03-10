@@ -1,0 +1,25 @@
+model:
+  name: "sam_vit_b"
+  model_id: "facebook/sam-vit-base"
+
+training:
+  epochs: 15
+  batch_size: 8 # maximum, 16 causes OOM
+  lr: 0.00005
+  weight_decay: 0
+  optimizer: "AdamW"
+  scheduler:
+    name: "none"
+  gradient_clipping: 1.0
+  aug_strategy: "no_aug"
+  prompt_type: "point"
+
+data:
+  mode: "full"
+  seed: 42
+  split_ratio: 0.8
+  root: "~/mcv/datasets/C5/KITTI-MOTS/"
+  num_workers: 4
+  
+project: "Week2-SAM-finetuning-points"
+output_dir: "/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune"

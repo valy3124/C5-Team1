@@ -260,10 +260,12 @@ def setup_model(exp: Exp, data: Data) -> Run:
         processor=processor
     )
 
-def prepare_batch_for_sam(batch, processor, device):
+def prepare_batch_for_sam(batch, processor, device, prompt_type="bbox"):
     """Process a raw batch of KITTIMOTS tuples into SAM inputs."""
     images = []
     batched_input_boxes = []
+    batched_input_points = []
+    batched_input_labels = []
     raw_masks_list = []
     num_boxes = []
     
@@ -276,9 +278,17 @@ def prepare_batch_for_sam(batch, processor, device):
         img_np = np.array(img_pil)
         
         boxes = []
+        points = []
+        labels = []
         masks = []
         for ann in anns:
             boxes.append(ann.bbox_xyxy)
+            x1, y1, x2, y2 = ann.bbox_xyxy
+            center_x = (x1 + x2) / 2.0
+            center_y = (y1 + y2) / 2.0
+            # 1 point per object
+            points.append([[center_x, center_y]])
+            labels.append([1]) # 1 for foreground
             masks.append(rletools.decode(ann.mask_rle).astype(np.uint8))
             
         if len(boxes) == 0:
@@ -286,32 +296,55 @@ def prepare_batch_for_sam(batch, processor, device):
             
         images.append(img_np)
         batched_input_boxes.append([boxes])
+        batched_input_points.append([points])
+        batched_input_labels.append([labels])
         raw_masks_list.append(torch.tensor(np.stack(masks), dtype=torch.float32))
         num_boxes.append(len(boxes))
         valid_targets_list.append(anns)
         valid_metas_list.append(meta)
 
     if len(images) == 0:
-        return None, None, None, None, None, None, None, None
-        
-    # SamProcessor expects homogeneously sized lists or crashes when converting to np.array internally
+        return None, None, None, None, None, None, None
+
     max_boxes = max(num_boxes)
-    for boxes in batched_input_boxes:
-        while len(boxes[0]) < max_boxes:
-            boxes[0].append([0, 0, 0, 0])
+    if prompt_type == "bbox":
+        for boxes in batched_input_boxes:
+            while len(boxes[0]) < max_boxes:
+                boxes[0].append([0, 0, 0, 0])
+                
+        inputs = processor(
+            images=images,
+            input_boxes=batched_input_boxes,
+            return_tensors="pt"
+        )
+    elif prompt_type == "point":
+        for pts, lbs in zip(batched_input_points, batched_input_labels):
+            while len(pts[0]) < max_boxes:
+                pts[0].append([[0, 0]])
+                lbs[0].append([0]) # 0 for ignore/background
+                
+        inputs = processor(
+            images=images,
+            input_points=batched_input_points,
+            input_labels=batched_input_labels,
+            return_tensors="pt"
+        )
+    else:
+        raise ValueError(f"Unknown prompt_type: {prompt_type}")
+    
+    original_sizes = inputs.pop("original_sizes").to(device)
+    reshaped_input_sizes = inputs.pop("reshaped_input_sizes").to(device)
+    
+    if "input_points" in inputs:
+        B = len(images)
+        inputs["input_points"] = inputs["input_points"].view(B, max_boxes, 1, 2)
+        if "input_labels" in inputs:
+            inputs["input_labels"] = inputs["input_labels"].view(B, max_boxes, 1)
             
-    inputs = processor(
-        images=images,
-        input_boxes=batched_input_boxes,
-        return_tensors="pt"
-    )
+    # Pack the remaining inputs (pixel_values, input_boxes OR input_points+input_labels) to device
+    sam_kwargs = {k: v.to(device) for k, v in inputs.items()}
     
-    pixel_values = inputs["pixel_values"].to(device)
-    input_boxes = inputs["input_boxes"].to(device)
-    original_sizes = inputs["original_sizes"].to(device)
-    reshaped_input_sizes = inputs["reshaped_input_sizes"].to(device)
-    
-    return pixel_values, input_boxes, raw_masks_list, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes
+    return sam_kwargs, raw_masks_list, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes
 
 
 def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device):
@@ -369,16 +402,17 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
     seg_loss_fn = DiceBCELoss()
     coco_dt_list = []
     
+    prompt_type = exp.cfg["training"].get("prompt_type", "bbox")
+    
     with torch.no_grad():
         for batch in loader:
-            pixel_values, input_boxes, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device)
-            if pixel_values is None:
+            sam_kwargs, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device, prompt_type)
+            if sam_kwargs is None:
                 continue
             
             with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu'):
                 outputs = model(
-                    pixel_values=pixel_values,
-                    input_boxes=input_boxes,
+                    **sam_kwargs,
                     multimask_output=False
                 )
                 pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d = postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device)
@@ -452,6 +486,8 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     
     print("Starting SAM Mask-Decoder training…")
     
+    prompt_type = exp.cfg["training"].get("prompt_type", "bbox")
+    
     pbar = tqdm(range(num_epochs), desc="Epochs", ascii=True)
     for epoch in pbar:
         # Training pass
@@ -461,17 +497,16 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_dice_sum = 0.0
         
         for batch_idx, batch in enumerate(data.train_loader):
-            pixel_values, input_boxes, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device)
+            sam_kwargs, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device, prompt_type)
             
-            if pixel_values is None:
+            if sam_kwargs is None:
                 continue
             
             run.optimizer.zero_grad()
             
             with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu'):
                 outputs = run.model(
-                    pixel_values=pixel_values,
-                    input_boxes=input_boxes,
+                    **sam_kwargs,
                     multimask_output=False
                 )
                 pred_1d, gt_1d, _, real_ious_1d, pred_ious_1d = postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device)

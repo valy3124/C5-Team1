@@ -122,6 +122,9 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
         aug = training.get("aug_strategy", "base")
         parts.append(str(aug))
         
+        prompt_type = training.get("prompt_type", "bbox")
+        parts.append(prompt_type)
+        
         if "lr" in training:
             parts.append(f"LR{training['lr']:.1e}")
             
@@ -140,7 +143,7 @@ def setup_experiment(config_path: str, args: argparse.Namespace) -> Exp:
 
         is_sweep = bool(os.environ.get("WANDB_SWEEP_ID"))
         if is_sweep:
-            parts = ["sam", str(training.get("aug_strategy", "base"))]
+            parts = ["sam", str(training.get("aug_strategy", "base")), prompt_type]
             
         cfg["experiment_name"] = "_".join(parts)
         print(f"Auto-generated experiment name: {cfg['experiment_name']}")
