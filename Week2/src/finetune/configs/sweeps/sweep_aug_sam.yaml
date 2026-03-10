@@ -12,12 +12,7 @@ parameters:
   # Fixed architecture baseline
   name_fields:
     value: "aug_strategy"
-  epochs:
-    value: 15
-  lr:
-    value: 0.00005
-  gradient_clipping:
-    value: 1.0
+
 
 command:
   - ${env}

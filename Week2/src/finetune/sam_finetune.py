@@ -3,11 +3,7 @@ import os
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 import sys
-import argparse
-import random
-import time
 import json
-import yaml
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,13 +17,15 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(ROOT_DIR))
 
-from Week2.src.datasets import KITTIMOTS, DEART, InstanceAnn
+from Week2.src.datasets import KITTIMOTS, InstanceAnn
 import pycocotools.mask as rletools
 from transformers import SamModel, SamProcessor, logging as hf_logging
 
 hf_logging.set_verbosity_error()
 
 import albumentations as A
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='albumentations.augmentations.dropout.functional')
 
 from Week2.src.finetune.utils import (
     Exp, Data, Run, Eval, 
@@ -48,7 +46,7 @@ class DiceBCELoss(nn.Module):
         inputs_flat = inputs.view(-1)
         targets_flat = targets.view(-1)
         
-        # Calculate BCE Loss with Logits (Autocast safe)
+        # Calculate BCE Loss with Logits
         BCE = F.binary_cross_entropy_with_logits(inputs_flat, targets_flat, reduction='mean')
         
         # Apply sigmoid to raw logits strictly for Dice calculation
@@ -67,7 +65,7 @@ def collate_fn(batch):
     return list(images), list(targets), list(metas)
 
 # -----------------------------------------------------------------------------
-# SAM Custom Dataset & Collate
+# Data Augmentations
 # -----------------------------------------------------------------------------
 def get_segm_transforms(is_train: bool = True, aug_strategy: str = "base") -> A.Compose:
     bbox_params = A.BboxParams(format="pascal_voc", label_fields=["class_labels"], clip=True, min_area=1, min_visibility=0.1)
@@ -100,7 +98,7 @@ def get_segm_transforms(is_train: bool = True, aug_strategy: str = "base") -> A.
             prob = 0.5 if aug_strategy == "limit_test" else 0.8
             tfms += [A.OneOf([A.RandomRain(brightness_coefficient=0.7, drop_width=1, blur_value=5, p=1), A.RandomFog(fog_coef_range=(0.4, 0.9), alpha_coef=0.1, p=1), A.RandomShadow(shadow_limit=(1, 3), p=1), A.RandomSunFlare(flare_roi=(0, 0, 1, 0.5), angle_limit=(0, 1), p=1)], p=prob)]
         if aug_strategy in ("heavy_corruption", "limit_test"):
-            tfms += [A.GaussNoise(var_limit=(10.0, 50.0), p=0.3), A.MotionBlur(blur_limit=(3, 7), p=0.3), A.CoarseDropout(num_holes_range=(2, 10), hole_height_range=(10, 40), hole_width_range=(10, 40), fill=0, p=0.4), A.ImageCompression(quality_range=(50, 90), p=0.3)]
+            tfms += [A.GaussNoise(p=0.3), A.MotionBlur(blur_limit=(3, 7), p=0.3), A.CoarseDropout(num_holes_range=(2, 10), hole_height_range=(10, 40), hole_width_range=(10, 40), fill=0, p=0.4), A.ImageCompression(quality_range=(50, 90), p=0.3)]
     
     return A.Compose(tfms, bbox_params=bbox_params)
 
@@ -202,7 +200,6 @@ def setup_data(exp: Exp) -> Data:
         train_ds = ApplyAlbumentationsSegm(train_ds, get_segm_transforms(True, aug_strategy))
         
     classes    = ["Background", "Car", "Pedestrian"]
-    # val_ds = ApplyAlbumentations(ds=BaseToTorchvision(base_val, label_remap=label_remap), tf=get_transforms(is_train=False))
 
     num_workers = cfg["data"].get("num_workers", 4)
     train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
@@ -295,7 +292,7 @@ def prepare_batch_for_sam(batch, processor, device):
         valid_metas_list.append(meta)
 
     if len(images) == 0:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
         
     # SamProcessor expects homogeneously sized lists or crashes when converting to np.array internally
     max_boxes = max(num_boxes)
@@ -311,32 +308,54 @@ def prepare_batch_for_sam(batch, processor, device):
     
     pixel_values = inputs["pixel_values"].to(device)
     input_boxes = inputs["input_boxes"].to(device)
+    original_sizes = inputs["original_sizes"].to(device)
+    reshaped_input_sizes = inputs["reshaped_input_sizes"].to(device)
     
-    return pixel_values, input_boxes, raw_masks_list, num_boxes, valid_metas_list, valid_targets_list
+    return pixel_values, input_boxes, raw_masks_list, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes
 
 
-def flatten_preds_and_gt(outputs, raw_masks, num_boxes, device):
-    """Flatten valid pred/gt pairs, discarding padded slots."""
+def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device):
+    """Upsample pred_masks to original image sizes and flatten for loss computation."""
     B = len(num_boxes)
-    # Reshape to (B, max_boxes, H, W). E.g: outputs.pred_masks is (B, 1, max_boxes, 1, H, W) -> (B, max_boxes, H, W)
     pred_masks = outputs.pred_masks.view(B, -1, outputs.pred_masks.shape[-2], outputs.pred_masks.shape[-1])
+    pred_ious_out = outputs.iou_scores.view(B, -1)
 
-    pred_list, gt_list = [], []
+    pred_list, gt_list, real_ious, pred_ious = [], [], [], []
     for i, n in enumerate(num_boxes):
-        pred_list.append(pred_masks[i, :n])          # (n, H_sam, W_sam)
-        gt_i = raw_masks[i].float().to(device)       # (n, H_orig, W_orig)
-        # Resize to SAM's 256x256 space per image (avoids cross-image size mismatch)
-        gt_i_resized = F.interpolate(gt_i.unsqueeze(1), size=(256, 256), mode="nearest").squeeze(1)
-        gt_list.append(gt_i_resized)                 # (n, 256, 256)
+        if n == 0:
+            pred_list.append(None)
+            continue
+            
+        valid_preds = pred_masks[i, :n].unsqueeze(1) # (n, 1, 256, 256)
+        orig_h, orig_w = original_sizes[i].tolist()
+        reshaped_h, reshaped_w = reshaped_input_sizes[i].tolist()
+        
+        # 1) Upsample to 1024x1024
+        up_masks = F.interpolate(valid_preds, size=(1024, 1024), mode="bilinear", align_corners=False)
+        # 2) Crop pad
+        up_masks = up_masks[..., :reshaped_h, :reshaped_w]
+        # 3) Upsample to original size
+        up_masks = F.interpolate(up_masks, size=(orig_h, orig_w), mode="bilinear", align_corners=False).squeeze(1)
+        
+        gt_mask = raw_masks[i].float().to(device)
+        pred_list.append(up_masks) # (n, orig_h, orig_w)
+        gt_list.append(gt_mask) # (n, orig_h, orig_w)
+        
+        # Compute true IoU for MSE loss
+        with torch.no_grad():
+            pred_bin = (up_masks > 0).float()
+            inter = (pred_bin * gt_mask).sum(dim=(-1, -2))
+            union = pred_bin.sum(dim=(-1, -2)) + gt_mask.sum(dim=(-1, -2)) - inter
+            real_ious.append(inter / (union + 1e-6))
+            
+        pred_ious.append(pred_ious_out[i, :n])
 
-    pred_cat = torch.cat(pred_list, dim=0)  # (total_objects, H_sam, W_sam)
-    gt_cat   = torch.cat(gt_list,   dim=0)  # (total_objects, 256, 256)
+    pred_1d = torch.cat([p.flatten() for p in pred_list if p is not None]) if pred_list else torch.empty(0, device=device)
+    gt_1d = torch.cat([g.flatten() for g in gt_list]) if gt_list else torch.empty(0, device=device)
+    real_ious_1d = torch.cat(real_ious) if real_ious else torch.empty(0, device=device)
+    pred_ious_1d = torch.cat(pred_ious) if pred_ious else torch.empty(0, device=device)
 
-    # GT is already 256x256; match pred to same size
-    gt_resized   = gt_cat.unsqueeze(1)    # (total, 1, 256, 256)
-    pred_resized = pred_cat.unsqueeze(1)  # (total, 1, H_sam, W_sam)
-
-    return pred_resized, gt_resized
+    return pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d
 
 def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -> Eval:
     """Evaluates SAM model computing average Dice Loss & BCE and COCO SEG metrics"""
@@ -352,7 +371,7 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
     
     with torch.no_grad():
         for batch in loader:
-            pixel_values, input_boxes, raw_masks, num_boxes, valid_metas_list, valid_targets_list = prepare_batch_for_sam(batch, run.processor, device)
+            pixel_values, input_boxes, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device)
             if pixel_values is None:
                 continue
             
@@ -362,31 +381,27 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
                     input_boxes=input_boxes,
                     multimask_output=False
                 )
-                pred_resized, gt_resized = flatten_preds_and_gt(outputs, raw_masks, num_boxes, device)
+                pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d = postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device)
                 
-                loss, loss_bce, loss_dice = seg_loss_fn(pred_resized, gt_resized)
+                loss_seg, loss_bce, loss_dice = seg_loss_fn(pred_1d, gt_1d)
+                loss_iou = F.mse_loss(pred_ious_1d, real_ious_1d)
+                loss = loss_seg + loss_iou
                 
             total_loss += loss.item()
             total_bce += loss_bce.item()
             total_dice += loss_dice.item()
 
             if coco_metrics is not None:
-                # outputs.pred_masks is (B, MaxBoxes, 1, 256, 256) when multimask=False
-                pred_masks_logits = outputs.pred_masks.squeeze(2).cpu() # (B, MaxBoxes, 256, 256)
-                
+                iou_scores_out = outputs.iou_scores.view(len(num_boxes), -1).cpu()
                 for i, (n, tgt, meta) in enumerate(zip(num_boxes, valid_targets_list, valid_metas_list)):
-                    if n == 0: continue
+                    if n == 0 or pred_list[i] is None: continue
                     image_id = meta["index"]
-                    raw_h, raw_w = raw_masks[i].shape[-2:]
                     
-                    mask_logits_i = pred_masks_logits[i, :n] # (n, 256, 256)
-                    # We have `n` masks. To interpolate, PyTorch needs a 4D tensor (B, C, H, W).
-                    # We can treat `n` as the Batch dimension, and add a dummy Channel dimension = 1.
-                    # This gives us (n, 1, 256, 256) -> Interpolate -> (n, 1, raw_H, raw_W) -> squeeze(1) -> (n, raw_H, raw_W)
-                    mask_logits_i_resized = F.interpolate(mask_logits_i.unsqueeze(1), size=(raw_h, raw_w), mode="bilinear", align_corners=False).squeeze(1)
+                    mask_logits_i_resized = pred_list[i].cpu() # (n, raw_h, raw_w)
+                    iou_scores_i = iou_scores_out[i, :n].numpy()
                     
                     pred_binary = (torch.sigmoid(mask_logits_i_resized) > 0.5).numpy().astype(np.uint8)
-                    scores = torch.sigmoid(mask_logits_i_resized).mean(dim=(-1, -2)).numpy()
+                    scores = iou_scores_i
                     
                     # Ensure we don't index past the targets list if augmentations dropped any
                     safe_n = min(n, len(tgt))
@@ -436,7 +451,6 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     seg_loss_fn = DiceBCELoss()
     
     print("Starting SAM Mask-Decoder training…")
-    start_train_time = time.time()
     
     pbar = tqdm(range(num_epochs), desc="Epochs", ascii=True)
     for epoch in pbar:
@@ -447,7 +461,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_dice_sum = 0.0
         
         for batch_idx, batch in enumerate(data.train_loader):
-            pixel_values, input_boxes, raw_masks, num_boxes, _, _ = prepare_batch_for_sam(batch, run.processor, device)
+            pixel_values, input_boxes, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device)
             
             if pixel_values is None:
                 continue
@@ -460,9 +474,11 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
                     input_boxes=input_boxes,
                     multimask_output=False
                 )
-                pred_resized, gt_resized = flatten_preds_and_gt(outputs, raw_masks, num_boxes, device)
+                pred_1d, gt_1d, _, real_ious_1d, pred_ious_1d = postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device)
                 
-                loss, loss_bce, loss_dice = seg_loss_fn(pred_resized, gt_resized)
+                loss_seg, loss_bce, loss_dice = seg_loss_fn(pred_1d, gt_1d)
+                loss_iou = F.mse_loss(pred_ious_1d, real_ious_1d)
+                loss = loss_seg + loss_iou
                 
             scaler.scale(loss).backward()
             
@@ -512,6 +528,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             "val_loss": val_loss,
             "val_bce": val_bce,
             "val_dice": val_dice,
+            "map_segm": val_segm_ap,
             "best_map_segm": run.best_map, 
             "best_epoch": run.best_epoch
         }
