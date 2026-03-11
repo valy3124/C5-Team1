@@ -9,15 +9,21 @@
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
 
-# FINETUNED_DIR="/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune/sam_aug/sam_no_aug_tqbwlssf"
+# FINETUNED_DIR="/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune/final_finetuned/sam_bbox_j6cstc09"
     # --prompt_type bbox \
 
-FINETUNED_DIR="/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune/sam_vit_b/sam_no_aug_point_LR5.0e-05_Opt_AdamW_GC_1.0_1dpjkahd"
+# FINETUNED_DIR="/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune/final_finetuned/sam_point_2oc8fzte"
+#     # --prompt_type point \
+
+FINETUNED_DIR="/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune/sam_vit_b/sam_no_aug_text_LR5.0e-05_Opt_AdamW_GC_1.0_cojcfscd"
+    # --prompt_type text \
+    # --text_prompt "Person. Car" \
 
 # Generate qualitative comparison for validation split
 python -m src.finetune.qualitative_compare_sam \
     --split validation \
     --finetuned_dir "$FINETUNED_DIR" \
     --n_samples 200 \
-    --prompt_type point \
-    --output_dir results_qualitative_sam/validation_point
+    --prompt_type text \
+    --text_prompt "Person. Car" \
+    --output_dir results_qualitative_sam/validation_text

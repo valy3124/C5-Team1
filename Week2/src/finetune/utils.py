@@ -51,6 +51,8 @@ class Run:
     scheduler:  Any = None
     best_map:   float = 0.0
     best_epoch: int   = 0
+    dino_model: Any = None        # Used for text prompts
+    dino_processor: Any = None
 
 @dataclass
 class Eval:

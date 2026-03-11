@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import SamModel, SamProcessor
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(ROOT_DIR))
@@ -47,6 +48,15 @@ def evaluate(args):
     model = SamModel.from_pretrained(args.model_id).to(device)
     model.eval()
 
+    dino_model = None
+    dino_processor = None
+    if args.prompt_type == "text":
+        dino_id = "IDEA-Research/grounding-dino-tiny"
+        print(f"Loading GroundingDINO {dino_id} ...")
+        dino_processor = AutoProcessor.from_pretrained(dino_id)
+        dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(dino_id).to(device)
+        dino_model.eval()
+
     loss_fn = DiceBCELoss()
 
     coco_metrics = CocoSegmentationMetrics(
@@ -64,7 +74,7 @@ def evaluate(args):
     with torch.no_grad():
         for batch in tqdm(loader, desc=f"Evaluating SAM on {args.split}"):
             sam_kwargs, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = \
-                prepare_batch_for_sam(batch, processor, device, args.prompt_type)
+                prepare_batch_for_sam(batch, processor, device, args.prompt_type, is_train=False, dino_model=dino_model, dino_processor=dino_processor, text_prompt=args.text_prompt)
             if sam_kwargs is None:
                 continue
 
@@ -78,11 +88,16 @@ def evaluate(args):
                     outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device
                 )
 
-                loss_seg, bce, dice = loss_fn(pred_1d, gt_1d)
-                loss_iou = F.mse_loss(pred_ious_1d, real_ious_1d)
-                loss = loss_seg + loss_iou
+                if gt_1d.numel() > 0:
+                    loss_seg, bce, dice = loss_fn(pred_1d, gt_1d)
+                    loss_iou = F.mse_loss(pred_ious_1d, real_ious_1d)
+                    loss = loss_seg + loss_iou
+                else:
+                    loss, bce, dice = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
 
-            total_loss += loss.item(); total_bce += bce.item(); total_dice += dice.item()
+            total_loss += loss.item()
+            total_bce += bce.item()
+            total_dice += dice.item()
 
             iou_scores_out = outputs.iou_scores.view(len(num_boxes), -1).cpu()
             for i, (n, tgt, meta) in enumerate(zip(num_boxes, valid_targets_list, valid_metas_list)):
@@ -110,12 +125,13 @@ def evaluate(args):
                     coco_dt_list.append({
                         "image_id": image_id,
                         "category_id": coco_cat_id,
-                        "segmentation": rle, "bbox": bbox,
+                        "segmentation": rle,
+                        "bbox": bbox,
                         "score": float(scores[j]),
                     })
 
     avg_loss = total_loss / max(1, len(loader))
-    avg_bce  = total_bce  / max(1, len(loader))
+    avg_bce = total_bce / max(1, len(loader))
     avg_dice = total_dice / max(1, len(loader))
     
     metrics = {"loss": avg_loss, "loss_bce": avg_bce, "loss_dice": avg_dice}
@@ -147,7 +163,8 @@ def parse_args():
     p.add_argument("--batch_size",   type=int,   default=4)
     p.add_argument("--seed",         type=int,   default=42)
     p.add_argument("--split_ratio",  type=float, default=0.8)
-    p.add_argument("--prompt_type",  default="bbox", choices=["bbox", "point"])
+    p.add_argument("--prompt_type",  default="bbox", choices=["bbox", "point", "text"])
+    p.add_argument("--text_prompt",  default="pedestrian. car.", type=str, help="Text labels for GroundingDINO when prompt_type is text")
     p.add_argument("--output",       default="results_eval/sam_pretrained_metrics.json")
     return p.parse_args()
 

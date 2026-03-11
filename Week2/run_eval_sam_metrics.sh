@@ -13,12 +13,14 @@ conda activate c5
 python -m src.finetune.eval_sam_metrics \
     --split dev \
     --batch_size 4 \
-    --prompt_type point \
-    --output results_eval/eval_sam_metrics_point_dev.json
+    --prompt_type text \
+    --text_prompt "Person. Car" \
+    --output results_eval/eval_sam_metrics_text_dev.json
 
 # Run quantitative evaluation on validation split
 python -m src.finetune.eval_sam_metrics \
     --split validation \
     --batch_size 4 \
-    --prompt_type point \
-    --output results_eval/eval_sam_metrics_point_validation.json
+    --prompt_type text \
+    --text_prompt "Person. Car" \
+    --output results_eval/eval_sam_metrics_text_validation.json

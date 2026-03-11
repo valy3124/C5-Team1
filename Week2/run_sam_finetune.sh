@@ -12,6 +12,6 @@ source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
 
 # Run FULL mode no_aug config
-python ./src/finetune/sam_finetune.py --config ./src/finetune/configs/config_sam_base_points.yaml
+python ./src/finetune/sam_finetune.py --config ./src/finetune/configs/config_sam_text.yaml
 
 echo "Done!"

@@ -13,20 +13,22 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import random
 
 import numpy as np
+import pycocotools.mask as rletools
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
-from transformers import SamModel, SamProcessor
-import pycocotools.mask as rletools
+from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, SamModel, SamProcessor
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(ROOT_DIR))
 
-from Week2.src.datasets import KITTIMOTS
+from Week2.src.datasets import KITTIMOTS, InstanceAnn
 
 _PALETTE = [
     (255, 50,  50),
@@ -56,7 +58,6 @@ def _overlay_masks(image: Image.Image, masks: List[np.ndarray], alpha: float = 0
 def _overlay_gt(image: Image.Image, anns: list, alpha: float = 0.45) -> Image.Image:
     base = np.array(image).copy()
     overlay = base.copy()
-    import random
     rng = random.Random(0)
     for ann in anns:
         mask = rletools.decode(ann.mask_rle).astype(np.uint8)
@@ -100,14 +101,30 @@ def make_comparison_strip(
     finetuned_masks: List[np.ndarray],
     meta: Dict[str, Any],
     prompt_type: str = "bbox",
+    text_prompt: str = "pedestrian. car.",
+    dino_boxes: List[List[float]] = None
 ) -> Image.Image:
-    title = "Original + GT BBoxes (Prompt: Points)" if prompt_type == "point" else "Original + GT BBoxes (Prompt: BBoxes)"
+    if prompt_type == "point":
+        title = "Original + GT BBoxes (Prompt: Points)"
+    elif prompt_type == "text":
+        title = "Original + GT BBoxes"
+    else:
+        title = "Original + GT BBoxes (Prompt: BBoxes)"
+        
     panels = [
         _add_title(_draw_bboxes(image, anns, prompt_type), title),
         _add_title(_overlay_gt(image, anns),  "Ground Truth Masks"),
+    ]
+    
+    if prompt_type == "text" and dino_boxes is not None:
+        fake_anns = [InstanceAnn(object_id=0, class_id=1, instance_id=0, mask_rle={}, bbox_xyxy=b) for b in dino_boxes]
+        panel_title = f"Input BBoxes from GroundedSAM (Prompt: Text '{text_prompt}')"
+        panels.append(_add_title(_draw_bboxes(image, fake_anns, "bbox"), panel_title))
+    
+    panels.extend([
         _add_title(_overlay_masks(image, pretrained_masks), "Pretrained SAM"),
         _add_title(_overlay_masks(image, finetuned_masks),  "Finetuned SAM"),
-    ]
+    ])
     max_w   = max(p.width  for p in panels)
     total_h = sum(p.height for p in panels)
     strip = Image.new("RGB", (max_w, total_h), (240, 240, 240))
@@ -132,16 +149,29 @@ class _SAMRunner:
         self.model.eval()
 
     @torch.no_grad()
-    def predict_masks(self, image: Image.Image, anns: list, prompt_type: str = "bbox") -> List[np.ndarray]:
-        boxes = [ann.bbox_xyxy for ann in anns]
-        if not boxes:
-            return []
-            
+    def predict_masks(self, image: Image.Image, anns: list, prompt_type: str = "bbox", dino_model=None, dino_processor=None, text_prompt="pedestrian. car.") -> Tuple[List[np.ndarray], List[List[float]]]:
         img_np = np.array(image)
         
-        if prompt_type == "bbox":
+        if prompt_type == "text" and dino_model is not None:
+            text_labels = text_prompt
+            try:
+                dino_inputs = dino_processor(images=image, text=[[lbl.strip() for lbl in text_labels.rstrip(".").split(".") if lbl.strip()]], return_tensors="pt").to(self.device)
+            except Exception:
+                dino_inputs = dino_processor(images=image, text=text_labels, return_tensors="pt").to(self.device)
+            dino_outputs = dino_model(**dino_inputs)
+            dino_results = dino_processor.post_process_grounded_object_detection(
+                dino_outputs, dino_inputs.input_ids, threshold=0.35, text_threshold=0.25, target_sizes=[image.size[::-1]]
+            )[0]
+            boxes = dino_results["boxes"].cpu().tolist()
+        else:
+            boxes = [ann.bbox_xyxy for ann in anns]
+            
+        if not boxes:
+            return [], boxes
+            
+        if prompt_type in ("bbox", "text"):
             raw_boxes = [list(b) for b in boxes]
-            batched_input_boxes = [raw_boxes] # [1, N, 4]
+            batched_input_boxes = [raw_boxes]
             inputs = self.processor(
                 images=[img_np],
                 input_boxes=[batched_input_boxes],
@@ -180,24 +210,21 @@ class _SAMRunner:
             )
             
             B = 1
-            pred_masks = outputs.pred_masks.view(B, -1, outputs.pred_masks.shape[-2], outputs.pred_masks.shape[-1]) # (1, N, 256, 256)
-            pred_logits = pred_masks[0] # (N, 256, 256)
+            pred_masks = outputs.pred_masks.view(B, -1, outputs.pred_masks.shape[-2], outputs.pred_masks.shape[-1])
+            pred_logits = pred_masks[0]
             
             orig_h, orig_w = inputs["original_sizes"][0].tolist()
             reshaped_h, reshaped_w = inputs["reshaped_input_sizes"][0].tolist()
             
-            valid_preds = pred_logits.unsqueeze(1) # (N, 1, 256, 256)
+            valid_preds = pred_logits.unsqueeze(1)
             
-            # 1) Upsample to 1024x1024
             up_masks = F.interpolate(valid_preds, size=(1024, 1024), mode="bilinear", align_corners=False)
-            # 2) Crop pad
             up_masks = up_masks[..., :reshaped_h, :reshaped_w]
-            # 3) Upsample to original size
-            up_masks = F.interpolate(up_masks, size=(orig_h, orig_w), mode="bilinear", align_corners=False).squeeze(1) # (N, orig_h, orig_w)
+            up_masks = F.interpolate(up_masks, size=(orig_h, orig_w), mode="bilinear", align_corners=False).squeeze(1)
             
-            pred_binary = (torch.sigmoid(up_masks) > 0.5).cpu().numpy().astype(bool) # (N, h, w) bool
+            pred_binary = (torch.sigmoid(up_masks) > 0.5).cpu().numpy().astype(bool)
             
-            return [pred_binary[j] for j in range(pred_binary.shape[0])]
+            return [pred_binary[j] for j in range(pred_binary.shape[0])], boxes
 
 def parse_args():
     p = argparse.ArgumentParser(description="SAM qualitative comparison (Equally spaced samples)")
@@ -208,7 +235,8 @@ def parse_args():
     p.add_argument("--n_samples", type=int, default=20)
     p.add_argument("--output_dir", default="results_qualitative_sam")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--prompt_type", default="bbox", choices=["bbox", "point"])
+    p.add_argument("--prompt_type", default="bbox", choices=["bbox", "point", "text"])
+    p.add_argument("--text_prompt", default="pedestrian. car.", type=str, help="Text labels for GroundingDINO when prompt_type is text")
     return p.parse_args()
 
 def main():
@@ -226,7 +254,6 @@ def main():
     ds = KITTIMOTS(root=args.root, split=args.split, ann_source="txt", seed=args.seed, compute_boxes=True)
     print(f"Dataset split='{args.split}' - {len(ds)} frames")
     
-    # Filter to frames that actually have annotations
     valid_indices = []
     for idx in range(len(ds)):
         _, anns, _ = ds[idx]
@@ -237,12 +264,20 @@ def main():
         print("No frames with annotations found.")
         return
         
-    # Sample equally spaced indices
     n_samples = min(args.n_samples, len(valid_indices))
     step = len(valid_indices) / n_samples
     selected = [valid_indices[int(i * step)] for i in range(n_samples)]
     
     print(f"Selected {len(selected)} equally spaced frames with annotations: {selected}")
+    
+    dino_model = None
+    dino_processor = None
+    if args.prompt_type == "text":
+        dino_id = "IDEA-Research/grounding-dino-tiny"
+        print(f"\nLoading GroundingDINO {dino_id} ...")
+        dino_processor = AutoProcessor.from_pretrained(dino_id)
+        dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(dino_id).to(device)
+        dino_model.eval()
     
     print("\nLoading models ...")
     pretrained = _SAMRunner(args.model_id, weights_path=None, device=device)
@@ -252,10 +287,10 @@ def main():
     for _, idx in enumerate(tqdm(selected, desc="Comparing (Equally Spaced)")):
         image, anns, meta = ds[idx]
         
-        pretrained_masks = pretrained.predict_masks(image, anns, args.prompt_type)
-        finetuned_masks  = finetuned.predict_masks(image, anns, args.prompt_type)
+        pretrained_masks, dino_boxes = pretrained.predict_masks(image, anns, args.prompt_type, dino_model, dino_processor, args.text_prompt)
+        finetuned_masks, _  = finetuned.predict_masks(image, anns, args.prompt_type, dino_model, dino_processor, args.text_prompt)
         
-        strip = make_comparison_strip(image, anns, pretrained_masks, finetuned_masks, meta, args.prompt_type)
+        strip = make_comparison_strip(image, anns, pretrained_masks, finetuned_masks, meta, args.prompt_type, args.text_prompt, dino_boxes)
         
         seq   = meta.get("seq",   "?")
         frame = meta.get("frame", idx)

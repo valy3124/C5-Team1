@@ -1,0 +1,27 @@
+model:
+  name: "sam_vit_b"
+  model_id: "facebook/sam-vit-base"
+
+training:
+  prompt_type: "text"
+  text_prompt: "Person. Car"
+  epochs: 15
+  batch_size: 4 # Reduced from 8 to 4 to avoid OOM with GroundingDINO + SAM
+  val_batch_size: 2
+  lr: 0.00005
+  weight_decay: 0
+  optimizer: "AdamW"
+  scheduler:
+    name: "none"
+  gradient_clipping: 1.0
+  aug_strategy: "no_aug"
+
+data:
+  mode: "full"
+  seed: 42
+  split_ratio: 0.8
+  root: "~/mcv/datasets/C5/KITTI-MOTS/"
+  num_workers: 4
+  
+project: "Week2-SAM-finetuning"
+output_dir: "/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune"
