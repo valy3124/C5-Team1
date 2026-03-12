@@ -2,10 +2,15 @@
 """
 qualitative_compare_sam.py
 
-Side-by-side qualitative comparison between the pretrained SAM and a finetuned
-SAM checkpoint.  For each sampled frame the script produces a 4-panel image:
+Qualitative comparison between the pretrained SAM and a finetuned SAM checkpoint.
 
-    | Original with GT BBoxes | GT masks | Pretrained SAM | Finetuned SAM |
+When prompt_type is "mix", generates a grid per frame:
+    Row 1:  | Original Image | Ground Truth Masks | (empty) |
+    Row 2:  | BBox Input     | Pretrained SAM     | Finetuned SAM |
+    Row 3:  | Point Input    | Pretrained SAM     | Finetuned SAM |
+    Row 4:  | Text Input     | Pretrained SAM     | Finetuned SAM |
+
+For a single prompt type, a 1-row x 3-col or backwards-compatible strip is produced.
 """
 import os
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -94,16 +99,89 @@ def _add_title(img: Image.Image, title: str, bar_h: int = 38) -> Image.Image:
     canvas.paste(img, (0, bar_h))
     return canvas
 
+def _make_blank(w: int, h: int) -> Image.Image:
+    return Image.new("RGB", (w, h), (220, 220, 220))
+
+def _hstack(panels: List[Image.Image], gap: int = 4) -> Image.Image:
+    """Paste panels side by side with equal heights."""
+    max_h = max(p.height for p in panels)
+    total_w = sum(p.width for p in panels) + gap * (len(panels) - 1)
+    canvas = Image.new("RGB", (total_w, max_h), (200, 200, 200))
+    x = 0
+    for p in panels:
+        canvas.paste(p, (x, 0))
+        x += p.width + gap
+    return canvas
+
+def _vstack(rows: List[Image.Image], gap: int = 4) -> Image.Image:
+    """Stack rows vertically."""
+    max_w = max(r.width for r in rows)
+    total_h = sum(r.height for r in rows) + gap * (len(rows) - 1)
+    canvas = Image.new("RGB", (max_w, total_h), (200, 200, 200))
+    y = 0
+    for r in rows:
+        canvas.paste(r, (0, y))
+        y += r.height + gap
+    return canvas
+
+
+def make_mix_grid(
+    image: Image.Image,
+    anns: list,
+    results_by_prompt: Dict[str, Dict],  # prompt_type -> {"pretrained_masks", "finetuned_masks", "dino_boxes"}
+    text_prompt: str = "pedestrian. car.",
+) -> Image.Image:
+    """Build a 4-row grid:
+    Row 1 (full width): Original image | GT masks | blank
+    Row 2: Bbox input | Pretrained | Finetuned
+    Row 3: Point input | Pretrained | Finetuned
+    Row 4: Text input | Pretrained | Finetuned
+    """
+    col_w = image.width
+    col_h = image.height
+
+    # --- Row 1: overview ---
+    orig_panel = _add_title(image.copy(), "Original Image")
+    gt_panel   = _add_title(_overlay_gt(image, anns), "Ground Truth Masks")
+    blank      = _add_title(_make_blank(col_w, col_h), "")
+    row1 = _hstack([orig_panel, gt_panel, blank])
+
+    prompt_configs = [
+        ("bbox",  "GT BBoxes (Prompt: BBox)",           "Pretrained SAM – BBox",   "Finetuned SAM – BBox"),
+        ("point", "GT Center Points (Prompt: Point)",   "Pretrained SAM – Point",  "Finetuned SAM – Point"),
+        ("text",  f"GroundedSAM boxes (Prompt: Text)",  "Pretrained SAM – Text",   "Finetuned SAM – Text"),
+    ]
+
+    rows = [row1]
+    for p_type, input_title, pre_title, ft_title in prompt_configs:
+        data = results_by_prompt.get(p_type, {})
+        pretrained_masks = data.get("pretrained_masks", [])
+        finetuned_masks  = data.get("finetuned_masks",  [])
+        dino_boxes       = data.get("dino_boxes",       None)
+
+        if p_type == "text" and dino_boxes is not None:
+            fake_anns = [InstanceAnn(object_id=0, class_id=1, instance_id=0, mask_rle={}, bbox_xyxy=b) for b in dino_boxes]
+            input_panel = _add_title(_draw_bboxes(image, fake_anns, "bbox"), input_title)
+        else:
+            input_panel = _add_title(_draw_bboxes(image, anns, p_type), input_title)
+
+        pre_panel = _add_title(_overlay_masks(image, pretrained_masks), pre_title)
+        ft_panel  = _add_title(_overlay_masks(image, finetuned_masks),  ft_title)
+        rows.append(_hstack([input_panel, pre_panel, ft_panel]))
+
+    return _vstack(rows)
+
+
 def make_comparison_strip(
     image: Image.Image,
     anns: list,
     pretrained_masks: List[np.ndarray],
     finetuned_masks: List[np.ndarray],
-    meta: Dict[str, Any],
     prompt_type: str = "bbox",
-    text_prompt: str = "pedestrian. car.",
+    text_prompt: str = "Person. Car",
     dino_boxes: List[List[float]] = None
 ) -> Image.Image:
+    """Original single-prompt strip (kept for backwards compatibility)."""
     if prompt_type == "point":
         title = "Original + GT BBoxes (Prompt: Points)"
     elif prompt_type == "text":
@@ -133,6 +211,7 @@ def make_comparison_strip(
         strip.paste(panel, (0, y))
         y += panel.height
     return strip
+
 
 class _SAMRunner:
     def __init__(self, model_id: str, weights_path: Optional[str], device: str):
@@ -226,6 +305,7 @@ class _SAMRunner:
             
             return [pred_binary[j] for j in range(pred_binary.shape[0])], boxes
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="SAM qualitative comparison (Equally spaced samples)")
     p.add_argument("--root", default="/ghome/group01/mcv/datasets/C5/KITTI-MOTS/")
@@ -235,9 +315,10 @@ def parse_args():
     p.add_argument("--n_samples", type=int, default=20)
     p.add_argument("--output_dir", default="results_qualitative_sam")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--prompt_type", default="bbox", choices=["bbox", "point", "text"])
-    p.add_argument("--text_prompt", default="pedestrian. car.", type=str, help="Text labels for GroundingDINO when prompt_type is text")
+    p.add_argument("--prompt_type", default="bbox", choices=["bbox", "point", "text", "mix"])
+    p.add_argument("--text_prompt", default="Person. Car", type=str, help="Text labels for GroundingDINO when prompt_type is text or mix")
     return p.parse_args()
+
 
 def main():
     args = parse_args()
@@ -272,7 +353,7 @@ def main():
     
     dino_model = None
     dino_processor = None
-    if args.prompt_type == "text":
+    if args.prompt_type in ["text", "mix"]:
         dino_id = "IDEA-Research/grounding-dino-tiny"
         print(f"\nLoading GroundingDINO {dino_id} ...")
         dino_processor = AutoProcessor.from_pretrained(dino_id)
@@ -283,21 +364,36 @@ def main():
     pretrained = _SAMRunner(args.model_id, weights_path=None, device=device)
     finetuned = _SAMRunner(args.model_id, weights_path=str(finetuned_weights), device=device)
     
+    prompt_types = ["bbox", "point", "text"] if args.prompt_type == "mix" else [args.prompt_type]
+
     print(f"\nRunning inference on {len(selected)} frames ...")
     for _, idx in enumerate(tqdm(selected, desc="Comparing (Equally Spaced)")):
         image, anns, meta = ds[idx]
-        
-        pretrained_masks, dino_boxes = pretrained.predict_masks(image, anns, args.prompt_type, dino_model, dino_processor, args.text_prompt)
-        finetuned_masks, _  = finetuned.predict_masks(image, anns, args.prompt_type, dino_model, dino_processor, args.text_prompt)
-        
-        strip = make_comparison_strip(image, anns, pretrained_masks, finetuned_masks, meta, args.prompt_type, args.text_prompt, dino_boxes)
-        
+
         seq   = meta.get("seq",   "?")
         frame = meta.get("frame", idx)
         fname = f"seq{seq}_frame{frame:06d}.jpg"
-        strip.save(out_dir / fname, quality=92)
+
+        if args.prompt_type == "mix":
+            results_by_prompt = {}
+            for p_type in prompt_types:
+                pre_masks, boxes = pretrained.predict_masks(image, anns, p_type, dino_model, dino_processor, args.text_prompt)
+                ft_masks, _      = finetuned.predict_masks(image, anns, p_type, dino_model, dino_processor, args.text_prompt)
+                results_by_prompt[p_type] = {
+                    "pretrained_masks": pre_masks,
+                    "finetuned_masks":  ft_masks,
+                    "dino_boxes": boxes if p_type == "text" else None,
+                }
+            grid = make_mix_grid(image, anns, results_by_prompt, args.text_prompt)
+            grid.save(out_dir / fname, quality=92)
+        else:
+            pretrained_masks, dino_boxes = pretrained.predict_masks(image, anns, args.prompt_type, dino_model, dino_processor, args.text_prompt)
+            finetuned_masks, _  = finetuned.predict_masks(image, anns, args.prompt_type, dino_model, dino_processor, args.text_prompt)
+            strip = make_comparison_strip(image, anns, pretrained_masks, finetuned_masks, args.prompt_type, args.text_prompt, dino_boxes)
+            strip.save(out_dir / fname, quality=92)
         
     print(f"\nSaved {len(selected)} comparison images to: {out_dir}")
+
 
 if __name__ == "__main__":
     main()

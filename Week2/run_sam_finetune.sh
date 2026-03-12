@@ -11,7 +11,7 @@ echo "JOB ID: $SLURM_JOB_ID"
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
 
-# Run FULL mode no_aug config
-python ./src/finetune/sam_finetune.py --config ./src/finetune/configs/config_sam_text.yaml
+# Run FULL mode mix config
+python ./src/finetune/sam_finetune.py --config ./src/finetune/configs/config_sam_mix.yaml
 
 echo "Done!"

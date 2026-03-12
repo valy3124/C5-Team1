@@ -9,18 +9,10 @@
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
 
-# Run quantitative evaluation on dev split
-python -m src.finetune.eval_sam_metrics \
-    --split dev \
-    --batch_size 4 \
-    --prompt_type text \
-    --text_prompt "Person. Car" \
-    --output results_eval/eval_sam_metrics_text_dev.json
-
-# Run quantitative evaluation on validation split
+# Run quantitative evaluation with mixed prompts (bbox + point + text) on validation split
 python -m src.finetune.eval_sam_metrics \
     --split validation \
     --batch_size 4 \
-    --prompt_type text \
+    --prompt_type mix \
     --text_prompt "Person. Car" \
-    --output results_eval/eval_sam_metrics_text_validation.json
+    --output results_eval/eval_sam_metrics_mix_validation.json

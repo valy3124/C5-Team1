@@ -47,14 +47,10 @@ class DiceBCELoss(nn.Module):
     def forward(self, inputs, targets, smooth=1):
         inputs_flat = inputs.view(-1)
         targets_flat = targets.view(-1)
-        
-        BCE = F.binary_cross_entropy_with_logits(inputs_flat, targets_flat, reduction='mean')
-        
+        BCE = F.binary_cross_entropy_with_logits(inputs_flat, targets_flat, reduction="mean")
         inputs_sig = torch.sigmoid(inputs_flat)
-        
         intersection = (inputs_sig * targets_flat).sum()
         dice_loss = 1 - (2. * intersection + smooth) / (inputs_sig.sum() + targets_flat.sum() + smooth)
-        
         return BCE + dice_loss, BCE, dice_loss
 
 def collate_fn(batch):
@@ -107,12 +103,6 @@ class ApplyAlbumentationsSegm(Dataset):
 
     def __len__(self) -> int:
         return len(self.ds)
-        
-    def _bbox_from_binary(self, mask: np.ndarray) -> tuple:
-        ys, xs = np.where(mask > 0)
-        if len(xs) == 0:
-            return (0, 0, 0, 0)
-        return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
     def __getitem__(self, idx: int):
         img_pil, raw_anns, meta = self.ds[idx]
@@ -150,7 +140,7 @@ class ApplyAlbumentationsSegm(Dataset):
         for orig_ann, aug_mask, aug_box, class_label in zip(raw_anns, aug_masks, aug_boxes, aug_labels):
             aug_mask = np.asfortranarray(aug_mask)
             rle = rletools.encode(aug_mask)
-            rle['counts'] = rle['counts'].decode('utf-8')
+            rle["counts"] = rle["counts"].decode("utf-8")
             
             h, w = aug_img_np.shape[:2]
             x1, y1, x2, y2 = aug_box
@@ -196,8 +186,9 @@ def setup_data(exp: Exp) -> Data:
     classes    = ["Background", "Car", "Pedestrian"]
 
     num_workers = cfg["data"].get("num_workers", 4)
-    train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg["training"].get("val_batch_size", 4), shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    persistent = num_workers > 0
+    train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=persistent)
+    val_loader = DataLoader(val_ds, batch_size=cfg["training"].get("val_batch_size", 4), shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=persistent)
 
     dataset_wrapper = cfg["data"].get("dataset_wrapper", "kitti_mots").lower()
     
@@ -249,7 +240,7 @@ def setup_model(exp: Exp, data: Data) -> Run:
     dino_model = None
     dino_processor = None
     prompt_type = cfg["training"].get("prompt_type", "bbox")
-    if prompt_type == "text":
+    if prompt_type in ["text", "mix"]:
         dino_id = "IDEA-Research/grounding-dino-tiny"
         print(f"Initialising GroundingDINO Model: {dino_id}")
         dino_processor = AutoProcessor.from_pretrained(dino_id)
@@ -367,7 +358,7 @@ def prepare_batch_for_sam(batch, processor, device, prompt_type="bbox", is_train
         return None, None, None, None, None, None, None
 
     max_boxes = max(num_boxes)
-    if prompt_type == "bbox" or prompt_type == "text":
+    if prompt_type in ("bbox", "text"):
         for boxes_i in batched_input_boxes:
             while len(boxes_i[0]) < max_boxes:
                 boxes_i[0].append([0, 0, 0, 0])
@@ -447,7 +438,7 @@ def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes,
 
     return pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d
 
-def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -> Eval:
+def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None, override_prompt_type: str = None) -> Eval:
     model = run.model
     device = exp.device
     model.eval()
@@ -458,7 +449,7 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
     seg_loss_fn = DiceBCELoss()
     coco_dt_list = []
     
-    prompt_type = exp.cfg["training"].get("prompt_type", "bbox")
+    prompt_type = override_prompt_type or exp.cfg["training"].get("prompt_type", "bbox")
     text_prompt = exp.cfg["training"].get("text_prompt", "pedestrian. car.")
     
     with torch.no_grad():
@@ -496,7 +487,7 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
                     if n == 0 or pred_list[i] is None: continue
                     image_id = meta["index"]
                     
-                    mask_logits_i_resized = pred_list[i].cpu() # (n, raw_h, raw_w)
+                    mask_logits_i_resized = pred_list[i].cpu()
                     iou_scores_i = iou_scores_out[i, :n].numpy()
                     
                     pred_binary = (torch.sigmoid(mask_logits_i_resized) > 0.5).numpy().astype(np.uint8)
@@ -510,7 +501,7 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
                         coco_cat_id = coco_metrics.label_map[cat_id]
                         mask_j = np.asfortranarray(pred_binary[j])
                         rle = rletools.encode(mask_j)
-                        rle['counts'] = rle['counts'].decode('utf-8')
+                        rle["counts"] = rle["counts"].decode("utf-8")
                         bbox = rletools.toBbox(rle).tolist()
                         
                         coco_dt_list.append({
@@ -555,15 +546,18 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     
     pbar = tqdm(range(num_epochs), desc="Epochs", ascii=True)
     for epoch in pbar:
-        # Training pass
         run.model.train()
         train_loss_sum = 0.0
         train_bce_sum = 0.0
         train_dice_sum = 0.0
         
         for batch_idx, batch in enumerate(data.train_loader):
+            current_prompt_type = prompt_type
+            if prompt_type == "mix":
+                current_prompt_type = np.random.choice(["bbox", "point", "text"])
+                
             sam_kwargs, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
-                batch, run.processor, device, prompt_type, is_train=True, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
+                batch, run.processor, device, current_prompt_type, is_train=True, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
             )
             
             if sam_kwargs is None:
@@ -601,12 +595,38 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_dice = train_dice_sum / max(1, len(data.train_loader))
         
         print(f"Evaluating epoch {epoch + 1}/{num_epochs}")
-        eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics)
         
-        val_segm_ap = eval_result.metrics.get("overall/AP_segm", 0.0) 
-        val_loss = eval_result.metrics.get("loss", 0.0)
-        val_bce = eval_result.metrics.get("loss_bce", 0.0)
-        val_dice = eval_result.metrics.get("loss_dice", 0.0)
+        prompt_types_to_eval = ["bbox", "point", "text"] if prompt_type == "mix" else [prompt_type]
+        aggregated_metrics = {}
+        all_eval_results = []
+        
+        for p_type in prompt_types_to_eval:
+            if len(prompt_types_to_eval) > 1:
+                print(f"  -> Evaluating with prompt: {p_type}")
+            res = evaluate(exp, run, data.val_loader, data.val_coco_metrics, override_prompt_type=p_type)
+            all_eval_results.append((p_type, res))
+            
+            for k, v in res.metrics.items():
+                if len(prompt_types_to_eval) > 1:
+                    aggregated_metrics[f"{p_type}_{k}"] = v
+                else:
+                    aggregated_metrics[k] = v
+
+        if len(prompt_types_to_eval) > 1:
+            val_segm_ap = sum(r.metrics.get("overall/AP_segm", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_loss = sum(r.metrics.get("loss", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_bce = sum(r.metrics.get("loss_bce", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_dice = sum(r.metrics.get("loss_dice", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            
+            aggregated_metrics["overall/AP_segm"] = val_segm_ap
+            aggregated_metrics["loss"] = val_loss
+            aggregated_metrics["loss_bce"] = val_bce
+            aggregated_metrics["loss_dice"] = val_dice
+        else:
+            val_segm_ap = aggregated_metrics.get("overall/AP_segm", 0.0)
+            val_loss = aggregated_metrics.get("loss", 0.0)
+            val_bce = aggregated_metrics.get("loss_bce", 0.0)
+            val_dice = aggregated_metrics.get("loss_dice", 0.0)
         
         run.history["train_loss"].append(train_loss)
         
@@ -615,7 +635,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             torch.save(run.model.state_dict(), exp.best_model_path)
             
             with open(os.path.join(exp.output_dir, "best_metrics.json"), "w") as fh:
-                json.dump(eval_result.metrics, fh, indent=4)
+                json.dump(aggregated_metrics, fh, indent=4)
             print(f"  >>> New best: COCO AP_segm {run.best_map:.4f} at epoch {epoch + 1}")
             
         print(f"Epoch {epoch + 1}/{num_epochs} | train_loss: {train_loss:.4f} val_loss: {val_loss:.4f} val_COCO_AP_segm: {val_segm_ap:.4f}")
@@ -632,16 +652,16 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             "best_map_segm": run.best_map, 
             "best_epoch": run.best_epoch
         }
-        wandb_log.update({f"val_{k}": v for k, v in eval_result.metrics.items()})
+        wandb_log.update({f"val_{k}": v for k, v in aggregated_metrics.items()})
         wandb.log(wandb_log)
 
         csv_path = os.path.join(exp.output_dir, "metrics_history.csv")
         write_header = not os.path.isfile(csv_path)
-        headers = ["epoch", "train_loss", "best_map_segm"] + [f"val_{k}" for k in eval_result.metrics.keys()]
+        headers = ["epoch", "train_loss", "best_map_segm"] + [f"val_{k}" for k in aggregated_metrics.keys()]
         
         with open(csv_path, "a") as fh:
             if write_header: fh.write(",".join(headers) + "\n")
-            row = [str(epoch + 1), f"{train_loss:.6f}", f"{run.best_map:.6f}"] + [f"{v:.6f}" for v in eval_result.metrics.values()]
+            row = [str(epoch + 1), f"{train_loss:.6f}", f"{run.best_map:.6f}"] + [f"{v:.6f}" for v in aggregated_metrics.values()]
             fh.write(",".join(row) + "\n")
             
         if run.scheduler is not None:
