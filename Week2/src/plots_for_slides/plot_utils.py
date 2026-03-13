@@ -598,8 +598,226 @@ def plot_improvement_heatmap(
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# Plot 7 – Augmentation strategy comparison (sam_aug sweep)
 # ---------------------------------------------------------------------------
+
+def _load_aug_experiments(aug_dir: str) -> list:
+    """
+    Load all experiments in aug_dir. Each sub-folder is expected to have
+    best_metrics.json and config.yaml.
+
+    Returns a list of dicts sorted by overall/AP_segm descending:
+        [{'label': str, 'aug_strategy': str, 'metrics': dict}, ...]
+    """
+    entries = []
+    base = Path(aug_dir)
+    if not base.exists():
+        print(f"[WARNING] Aug directory not found: {aug_dir}")
+        return entries
+
+    for run_dir in sorted(base.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        metrics_file = run_dir / "best_metrics.json"
+        config_file  = run_dir / "config.yaml"
+        if not metrics_file.exists() or not config_file.exists():
+            print(f"[SKIP] {run_dir.name}: missing files")
+            continue
+        with open(metrics_file) as f:
+            metrics = json.load(f)
+        with open(config_file) as f:
+            config = yaml.safe_load(f)
+        aug = config.get("training", {}).get("aug_strategy",
+              config.get("experiment_name", run_dir.name))
+        # Pretty-print: underscores to spaces, title-case
+        label = aug.replace("_", " ").title()
+        entries.append({"label": label, "aug_strategy": aug, "metrics": metrics})
+
+    # Sort best → worst by overall mAP
+    entries.sort(key=lambda e: e["metrics"].get("overall/AP_segm", 0), reverse=True)
+    return entries
+
+
+# Assign a distinct colour to each augmentation strategy
+_AUG_PALETTE = [
+    "#1f4e79", "#2d9e6b", "#e86c1f", "#7b2d8b",
+    "#c0392b", "#f39c12", "#16a085", "#8e44ad",
+]
+
+
+def plot_aug_comparison(aug_dir: str, output_dir: str):
+    """
+    Two plots saved for the augmentation sweep:
+      1. aug_strategy_mAP.png  – horizontal bar chart ranked by mAP,
+                                  with Car AP and Person AP as inner bars.
+      2. aug_strategy_heatmap.png – heatmap (strategies × metrics).
+    """
+    entries = _load_aug_experiments(aug_dir)
+    if not entries:
+        print("[SKIP] plot_aug_comparison: no data found")
+        return
+
+    labels   = [e["label"]      for e in entries]
+    map_vals = [e["metrics"].get("overall/AP_segm", 0) * 100  for e in entries]
+    car_vals = [e["metrics"].get("car/AP_segm",     0) * 100  for e in entries]
+    ped_vals = [e["metrics"].get("person/AP_segm",  0) * 100  for e in entries]
+    colors   = [_AUG_PALETTE[i % len(_AUG_PALETTE)] for i in range(len(entries))]
+
+    # ---- Plot A: simple vertical bar chart – mAP per strategy ---------------
+    n = len(labels)
+    x = np.arange(n)
+
+    fig, ax = plt.subplots(figsize=(max(10, n * 1.6), 7))
+    ax.set_title("Augmentation Strategy Comparison – mAP",
+                 fontsize=TITLE_FS, fontweight="bold", pad=14)
+
+    bars = ax.bar(x, map_vals, color=COLORS["finetuned"], edgecolor="white", width=0.6)
+
+    for bar, val in zip(bars, map_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.8,
+                f"{val:.1f}", ha="center", va="bottom",
+                fontsize=BAR_FS, fontweight="bold", color="black")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=HEAT_FS, rotation=30, ha="right")
+    ax.set_ylim(0, 105)
+    ax.set_ylabel("mAP (%)", fontsize=LABEL_FS)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    _save(fig, output_dir, "aug_strategy_mAP.png")
+
+    # ---- Plot B: heatmap (strategies × 6 metrics) ---------------------------
+    hmap_keys = [
+        "overall/AP_segm",
+        "overall/AP_small_segm",
+        "overall/AP_medium_segm",
+        "overall/AP_large_segm",
+        "car/AP_segm",
+        "person/AP_segm",
+    ]
+    hmap_labels = ["mAP", "mAP_small", "mAP_med", "mAP_large", "Car AP", "Person AP"]
+
+    matrix = np.array([
+        [e["metrics"].get(k, 0) * 100 for k in hmap_keys]
+        for e in entries
+    ])
+
+    fig2, ax2 = plt.subplots(figsize=(14, max(4, n * 0.85 + 1.5)))
+    im = ax2.imshow(matrix, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
+    ax2.set_title("Augmentation Strategy – Full Metrics Heatmap",
+                  fontsize=TITLE_FS, fontweight="bold", pad=14)
+
+    ax2.set_xticks(np.arange(len(hmap_labels)))
+    ax2.set_yticks(np.arange(n))
+    ax2.set_xticklabels(hmap_labels, fontsize=HEAT_FS)
+    ax2.set_yticklabels(labels, fontsize=HEAT_FS)
+    ax2.grid(False)
+    for spine in ax2.spines.values():
+        spine.set_visible(False)
+
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            ax2.text(j, i, f"{matrix[i, j]:.1f}",
+                     ha="center", va="center",
+                     fontsize=ANNOT_FS, fontweight="bold", color="black")
+
+    cbar = fig2.colorbar(im, ax=ax2, fraction=0.015, pad=0.02)
+    cbar.ax.set_ylabel("(%)", rotation=-90, va="bottom", labelpad=12, fontsize=LABEL_FS)
+    cbar.outline.set_visible(False)
+    cbar.ax.tick_params(labelsize=HEAT_FS)
+
+    plt.tight_layout()
+    _save(fig2, output_dir, "aug_strategy_heatmap.png")
+
+
+# ---------------------------------------------------------------------------
+# Plot 8 – Generalization: Dev vs. Validation splits (Pre vs. Finetuned)
+# ---------------------------------------------------------------------------
+
+def plot_generalization_comparison(finetuned_models, pretrained_evals, aug_dir, output_dir):
+    """
+    Shows performance on Dev vs Validation splits to demonstrate generalization.
+    Points to compare:
+    1. Pretrained Dev: results_eval/eval_sam_metrics_dev.json
+    2. Finetuned Dev: results_finetune/sam_aug/sam_no_aug_tqbwlssf/best_metrics.json
+    3. Pretrained Val: results_eval/eval_sam_metrics_validation.json
+    4. Finetuned Val: results_finetune/final_finetuned/sam_bbox_j6cstc09/best_metrics.json
+    """
+    # 1. Load specific metrics
+    def load_json(path):
+        p = Path(path)
+        if not p.exists():
+            return None
+        with open(p) as f:
+            return json.load(f)
+
+    # Hardcoded paths based on the requested specific models/splits
+    pre_dev_path = Path(output_dir).parent / "eval_sam_metrics_dev.json"
+    ft_dev_path  = Path(aug_dir) / "sam_no_aug_tqbwlssf" / "best_metrics.json"
+    pre_val_path = Path(output_dir).parent / "eval_sam_metrics_validation.json"
+    # Find the bbox folder in finetuned_dir (passed as finetuned_models keys)
+    # We'll look for j6cstc09 specifically as identified
+    ft_val_base = Path(aug_dir).parent / "final_finetuned"
+    ft_val_path = ft_val_base / "sam_bbox_j6cstc09" / "best_metrics.json"
+
+    m_pre_dev = load_json(pre_dev_path)
+    m_ft_dev  = load_json(ft_dev_path)
+    m_pre_val = load_json(pre_val_path)
+    m_ft_val  = load_json(ft_val_path)
+
+    if not (m_pre_dev and m_ft_dev and m_pre_val and m_ft_val):
+        print(f"[SKIP] plot_generalization_comparison: missing one or more metric files.")
+        if not m_pre_dev: print(f"  Missing: {pre_dev_path}")
+        if not m_ft_dev:  print(f"  Missing: {ft_dev_path}")
+        if not m_pre_val: print(f"  Missing: {pre_val_path}")
+        if not m_ft_val:  print(f"  Missing: {ft_val_path}")
+        return
+
+    splits = ["Dev Split", "Validation Split"]
+    pre_vals = [
+        m_pre_dev.get("overall/AP_segm", 0) * 100,
+        m_pre_val.get("overall/AP_segm", 0) * 100
+    ]
+    ft_vals = [
+        m_ft_dev.get("overall/AP_segm", 0) * 100,
+        m_ft_val.get("overall/AP_segm", 0) * 100
+    ]
+
+    x = np.arange(len(splits))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.set_title("Finetuning Generalization – Dev vs. Validation Splits",
+                 fontsize=TITLE_FS, fontweight="bold", pad=20)
+
+    bars_pre = ax.bar(x - width/2, pre_vals, width, label="Pretrained",
+                      color=COLORS["pretrained"], edgecolor="white")
+    bars_ft  = ax.bar(x + width/2, ft_vals,  width, label="Finetuned",
+                      color=COLORS["finetuned"], edgecolor="white")
+
+    # Labels
+    for bar, val in zip(bars_pre, pre_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.8,
+                f"{val:.1f}", ha="center", va="bottom", fontsize=BAR_FS, fontweight="bold", color="black")
+
+    for bar, val, pval in zip(bars_ft, ft_vals, pre_vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.8,
+                f"{val:.1f}", ha="center", va="bottom", fontsize=BAR_FS, fontweight="bold", color="black")
+        _annotate_delta(ax, bar, val - pval)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(splits, fontsize=HEAT_FS)
+    ax.set_ylim(0, 125)
+    ax.set_ylabel("mAP (%)", fontsize=LABEL_FS)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(fontsize=LEGEND_FS, frameon=False, loc="upper left")
+
+    plt.tight_layout()
+    _save(fig, output_dir, "generalization_comparison.png")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -614,6 +832,12 @@ def parse_args():
         "--eval_dir",
         type=str,
         default="/ghome/group01/C5/benet/C5-Team1/Week2/results_eval",
+    )
+    parser.add_argument(
+        "--aug_dir",
+        type=str,
+        default="/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune/sam_aug",
+        help="Directory containing augmentation sweep experiments.",
     )
     parser.add_argument(
         "--output_dir",
@@ -653,6 +877,14 @@ def main():
 
     # 6. Delta improvement heatmap
     plot_improvement_heatmap(finetuned_models, pretrained_evals, args.output_dir)
+
+    # 7. Augmentation strategy comparison (sam_aug sweep)
+    print("\nGenerating augmentation strategy plots...")
+    plot_aug_comparison(args.aug_dir, args.output_dir)
+
+    # 8. Generalization comparison
+    print("\nGenerating generalization comparison plot...")
+    plot_generalization_comparison(finetuned_models, pretrained_evals, args.aug_dir, args.output_dir)
 
     print("\nDone! All plots saved.")
 
