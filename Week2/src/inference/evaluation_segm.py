@@ -12,7 +12,7 @@ from pycocotools.cocoeval import COCOeval
 import pycocotools.mask as maskUtils
 
 # Import BOTH datasets
-from Week2.src.datasets import KITTIMOTS, DEART
+from datasets import KITTIMOTS, DEART
 
 def xyxy_to_xywh(bbox_xyxy):
     x1, y1, x2, y2 = bbox_xyxy
@@ -109,4 +109,85 @@ class CocoSegmentationMetrics:
             }
             metrics.update(cat_metrics)
             
+        # Attach the global coco_eval for optional error analysis
+        self._last_coco_eval = coco_eval
         return metrics
+
+    def compute_error_analysis(self, coco_dt: COCO) -> Dict[str, float]:
+        """
+        Compute FP / Recall error analysis after evaluation.
+
+        Uses the COCOeval already run by compute_metrics (stored as
+        self._last_coco_eval) if available, otherwise re-runs it.
+
+        Returns
+        -------
+        dict with keys:
+          error_analysis/total_fp          – number of FP detections at IoU≥0.50
+          error_analysis/avg_fp_confidence – mean score of those FPs
+          error_analysis/recall_at_50      – overall recall at IoU=0.50
+          error_analysis/total_tp          – number of TP detections at IoU≥0.50
+          error_analysis/total_gt          – total GT annotations
+        """
+        coco_eval = getattr(self, "_last_coco_eval", None)
+        if coco_eval is None or not hasattr(coco_eval, "evalImgs"):
+            print("Re-running COCOeval for error analysis...")
+            coco_eval = COCOeval(self.coco_gt, coco_dt, "segm")
+            coco_eval.evaluate()
+            coco_eval.accumulate()
+
+        # ── Extract per-image TP / FP from evalImgs ──────────────────────
+        # evalImgs is a list (one entry per image × category × area-range × maxDet).
+        # We use iouThr index 0 → IoU = 0.50 (matches COCO AP@0.50 threshold).
+        iou_idx = 0   # corresponds to iouThrs[0] = 0.50
+
+        total_tp   = 0
+        total_fp   = 0
+        fp_scores  = []
+        total_gt   = 0
+        per_detection_tp: dict = {}   # det_id (int) → 1=TP, 0=FP
+
+        for ev in coco_eval.evalImgs:
+            if ev is None:
+                continue
+            dt_ids     = ev["dtIds"]                  # list of detection IDs
+            dt_matches = np.array(ev["dtMatches"])    # shape (n_iou, n_dt)
+            dt_ignore  = np.array(ev["dtIgnore"])     # shape (n_iou, n_dt)
+            dt_scores  = np.array(ev["dtScores"])     # shape (n_dt,)
+            gt_ignore  = np.array(ev["gtIgnore"])    # shape (n_gt,)
+
+            n_dt = dt_scores.shape[0]
+            total_gt += int((gt_ignore == 0).sum())
+
+            for d in range(n_dt):
+                det_id = dt_ids[d]
+                if dt_ignore[iou_idx, d]:
+                    # Ignored detection — mark as -1 so CSV shows it clearly
+                    per_detection_tp[det_id] = -1
+                    continue
+                if dt_matches[iou_idx, d] > 0:
+                    total_tp += 1
+                    per_detection_tp[det_id] = 1
+                else:
+                    total_fp += 1
+                    per_detection_tp[det_id] = 0
+                    fp_scores.append(float(dt_scores[d]))
+
+        avg_fp_conf = float(np.mean(fp_scores)) if fp_scores else 0.0
+        recall_at_50 = total_tp / total_gt if total_gt > 0 else 0.0
+
+        print(f"\n--- Error Analysis (IoU ≥ 0.50) ---")
+        print(f"  Total GT annotations : {total_gt}")
+        print(f"  Total TP             : {total_tp}")
+        print(f"  Total FP             : {total_fp}")
+        print(f"  Recall@0.50          : {recall_at_50:.4f}")
+        print(f"  Avg FP confidence    : {avg_fp_conf:.4f}")
+
+        summary = {
+            "error_analysis/total_fp":          total_fp,
+            "error_analysis/total_tp":          total_tp,
+            "error_analysis/total_gt":          total_gt,
+            "error_analysis/avg_fp_confidence": avg_fp_conf,
+            "error_analysis/recall_at_50":      recall_at_50,
+        }
+        return summary, per_detection_tp

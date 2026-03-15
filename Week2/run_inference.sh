@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sam_grid_inference
+#SBATCH --job-name=yolo_sam_finetuned_inference
 #SBATCH --partition=mlow
 #SBATCH --account=master
 #SBATCH --gres=gpu:1
@@ -11,5 +11,9 @@
 python -m src.inference.run_inference \
     --model grounded_sam \
     --prompt text \
-    --exp_name grounded_sam_text_validation_attributes \
-    --text_labels "red car ."
+    --text_labels "person. car." \
+    --evaluate \
+    --dataset kitti_mots \
+    --exp_name "grounded_sam_text_person_car_v4" \
+    --split validation \
+    --save_prompt_boxes
