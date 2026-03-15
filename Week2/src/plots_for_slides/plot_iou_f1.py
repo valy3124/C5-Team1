@@ -62,6 +62,7 @@ PROMPT_COLORS = {
     "bbox":  ("#1f4e79", "#8ecae6"),
     "point": ("#2d9e6b", "#a8d5c2"),
     "text":  ("#e86c1f", "#f4b49e"),
+    "mix":   ("#7b2d8b", "#c9a8d4"),
 }
 
 
@@ -95,6 +96,30 @@ def extract_finetuned_curve(finetuned: dict, prompt_type: str) -> tuple[list[flo
     return best_f1s, best_name
 
 
+def extract_mix_curve(finetuned: dict) -> list[float]:
+    """
+    Return the F1 curve for the mix finetuned model, averaging across its three
+    sub-prompt evaluations (bbox, point, text).
+    """
+    mix_models = {name: data for name, data in finetuned.items() if "mix" in name.lower()}
+    if not mix_models:
+        return [float("nan")] * len(IOU_THRESHOLDS)
+
+    # Pick the mix model with the highest average mF1 across sub-prompts
+    best_model = max(
+        mix_models.values(),
+        key=lambda d: np.nanmean([d.get(pt, {}).get("overall/mF1_segm", 0.0)
+                                   for pt in ("bbox", "point", "text")]),
+    )
+    curves = [
+        [best_model.get(pt, {}).get(f"overall/F1_score_{iou}_segm", float("nan"))
+         for iou in IOU_THRESHOLDS]
+        for pt in ("bbox", "point", "text")
+        if pt in best_model
+    ]
+    return list(np.nanmean(curves, axis=0)) if curves else [float("nan")] * len(IOU_THRESHOLDS)
+
+
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
@@ -116,9 +141,11 @@ def _style_ax(ax, ylabel: bool = False):
 
 
 def plot_iou_vs_f1(pretrained: dict, finetuned: dict, output_dir: str):
-    """One subplot per prompt type showing pretrained vs finetuned F1 curves."""
+    """One subplot per prompt type showing pretrained vs finetuned F1 curves.
+    An additional Mix-model line (average of bbox/point/text) is overlaid on each subplot."""
     os.makedirs(output_dir, exist_ok=True)
     iou_x = [t / 100 for t in IOU_THRESHOLDS]
+    mix_f1s = extract_mix_curve(finetuned)
 
     fig, axes = plt.subplots(
         1, len(PROMPT_TYPES),
@@ -144,6 +171,12 @@ def plot_iou_vs_f1(pretrained: dict, finetuned: dict, output_dir: str):
             marker=MARKERS["finetuned"], linewidth=2.5, markersize=7,
             label="Finetuned",
         )
+        ax.plot(
+            iou_x, mix_f1s,
+            color=PROMPT_COLORS["mix"][0], linestyle="-.",
+            marker="^", linewidth=2.0, markersize=7,
+            label="Finetuned (Mix, avg)",
+        )
         ax.set_title(PROMPT_LABELS[prompt_type], fontweight="bold")
         _style_ax(ax, ylabel=(prompt_type == PROMPT_TYPES[0]))
         ax.legend(frameon=False)
@@ -156,7 +189,8 @@ def plot_iou_vs_f1(pretrained: dict, finetuned: dict, output_dir: str):
 
 
 def plot_iou_vs_f1_combined(pretrained: dict, finetuned: dict, output_dir: str):
-    """All prompt types on a single axes; dashed = pretrained, solid = finetuned."""
+    """All prompt types on a single axes; dashed = pretrained, solid = finetuned.
+    An extra Mix line (average of bbox/point/text from the mix model) is also included."""
     os.makedirs(output_dir, exist_ok=True)
     iou_x = [t / 100 for t in IOU_THRESHOLDS]
 
@@ -174,6 +208,12 @@ def plot_iou_vs_f1_combined(pretrained: dict, finetuned: dict, output_dir: str):
         ax.plot(iou_x, ft_f1s,
                 color=ft_col,  linestyle="-",  marker="s", linewidth=2.5, markersize=7,
                 label=f"{label} Finetuned")
+
+    # Mix finetuned model: average F1 across bbox / point / text sub-prompts
+    mix_col, _ = PROMPT_COLORS["mix"]
+    ax.plot(iou_x, extract_mix_curve(finetuned),
+            color=mix_col, linestyle="-.", marker="^", linewidth=2.5, markersize=7,
+            label="Mix Finetuned (avg)")
 
     _style_ax(ax, ylabel=True)
     ax.legend(fontsize=LEGEND_FS - 1, frameon=True, ncol=2, loc="upper right",
