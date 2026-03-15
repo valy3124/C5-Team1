@@ -16,7 +16,8 @@ from datasets import KITTIMOTS, DEART
 
 def xyxy_to_xywh(bbox_xyxy):
     x1, y1, x2, y2 = bbox_xyxy
-    return [x1, y1, x2-x1, y2-y1]
+    return [x1, y1, x2 - x1, y2 - y1]
+
 
 class CocoSegmentationMetrics:
     def __init__(self, root: str, dataset_name: str = "kitti_mots", split: str = "validation", ann_source: str = "txt", seed: int = 42, split_ratio: float = 0.8):

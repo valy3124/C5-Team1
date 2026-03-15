@@ -15,4 +15,4 @@ python -m src.finetune.eval_sam_metrics \
     --batch_size 4 \
     --prompt_type mix \
     --text_prompt "Person. Car" \
-    --output results_eval/eval_sam_metrics_mix_validation.json
+    --output results_eval/eval_sam_metrics_mix_validation2.json
