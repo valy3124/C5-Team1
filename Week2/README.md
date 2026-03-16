@@ -1,4 +1,4 @@
-# Week 2: Segmentation and Zero-Shot Discovery
+# Week 2: Object Segmentation
 
 ## Overview
 
