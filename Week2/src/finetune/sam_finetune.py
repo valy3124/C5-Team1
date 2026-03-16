@@ -20,6 +20,8 @@ sys.path.append(str(ROOT_DIR))
 from Week2.src.datasets import KITTIMOTS, InstanceAnn
 import pycocotools.mask as rletools
 from transformers import SamModel, SamProcessor, logging as hf_logging
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+from torchvision.ops import box_iou
 
 hf_logging.set_verbosity_error()
 
@@ -34,7 +36,8 @@ from Week2.src.finetune.utils import (
 from Week2.src.inference.evaluation_segm import CocoSegmentationMetrics
 from Week2.src.inference.evaluation_semantic import SemanticEvaluator, CLASS_NAMES
 from typing import Any, Dict, List
-import PIL.Image as Image
+from PIL import Image
+
 # -----------------------------------------------------------------------------
 # SAM Custom Dataset & Collate
 # -----------------------------------------------------------------------------
@@ -43,26 +46,16 @@ class DiceBCELoss(nn.Module):
         super(DiceBCELoss, self).__init__()
 
     def forward(self, inputs, targets, smooth=1):
-        # Flatten label and prediction tensors
         inputs_flat = inputs.view(-1)
         targets_flat = targets.view(-1)
-        
-        # Calculate BCE Loss with Logits
-        BCE = F.binary_cross_entropy_with_logits(inputs_flat, targets_flat, reduction='mean')
-        
-        # Apply sigmoid to raw logits strictly for Dice calculation
-        inputs_sig = F.sigmoid(inputs_flat)       
-        
-        # Calculate Dice Loss
-        intersection = (inputs_sig * targets_flat).sum()                            
-        dice_loss = 1 - (2.*intersection + smooth)/(inputs_sig.sum() + targets_flat.sum() + smooth)  
-        
-        # Combine them
+        BCE = F.binary_cross_entropy_with_logits(inputs_flat, targets_flat, reduction="mean")
+        inputs_sig = torch.sigmoid(inputs_flat)
+        intersection = (inputs_sig * targets_flat).sum()
+        dice_loss = 1 - (2. * intersection + smooth) / (inputs_sig.sum() + targets_flat.sum() + smooth)
         return BCE + dice_loss, BCE, dice_loss
 
 def collate_fn(batch):
     images, targets, metas = zip(*batch)
-    # Return them all as lists
     return list(images), list(targets), list(metas)
 
 # -----------------------------------------------------------------------------
@@ -111,26 +104,18 @@ class ApplyAlbumentationsSegm(Dataset):
 
     def __len__(self) -> int:
         return len(self.ds)
-        
-    def _bbox_from_binary(self, mask: np.ndarray) -> tuple:
-        ys, xs = np.where(mask > 0)
-        if len(xs) == 0:
-            return (0, 0, 0, 0)
-        return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
 
     def __getitem__(self, idx: int):
         img_pil, raw_anns, meta = self.ds[idx]
         img_np = np.array(img_pil)
         
         if len(raw_anns) == 0:
-            # If no annots to begin with, just pass through identity to prevent crashes
             return img_pil, raw_anns, meta
             
         boxes = []
         labels = []
         masks = []
         
-        # Decode the RLE masks into dense format for the image-level transform
         for ann in raw_anns:
             x1, y1, x2, y2 = ann.bbox_xyxy
             if x2 <= x1 or y2 <= y1:
@@ -150,17 +135,14 @@ class ApplyAlbumentationsSegm(Dataset):
         aug_masks = out["masks"]
         
         if len(aug_boxes) == 0:
-             # Fast-fail recovery: target disappeared. Fetch a safe unaugmented adjacent item randomly
              return self.__getitem__((idx + 1) % len(self))
              
-        # Re-pack the transformed items into the original InstanceAnn schema
         new_anns = []
         for orig_ann, aug_mask, aug_box, class_label in zip(raw_anns, aug_masks, aug_boxes, aug_labels):
             aug_mask = np.asfortranarray(aug_mask)
             rle = rletools.encode(aug_mask)
-            rle['counts'] = rle['counts'].decode('utf-8')
+            rle["counts"] = rle["counts"].decode("utf-8")
             
-            # Use Albumentations transformed bounding box, clamped just in case
             h, w = aug_img_np.shape[:2]
             x1, y1, x2, y2 = aug_box
             safe_box = (max(0, min(w, x1)), max(0, min(h, y1)), max(0, min(w, x2)), max(0, min(h, y2)))
@@ -189,22 +171,25 @@ def setup_data(exp: Exp) -> Data:
     split_ratio = cfg["data"].get("split_ratio", 0.8)
     aug_strategy = cfg["training"].get("aug_strategy", "legacy")
 
-    if mode == "full": train_split, val_split = "train_full", "validation"
-    elif mode == "search": train_split, val_split = "train", "dev"
-    else: raise ValueError(f"Unknown data.mode '{mode}'.")
+    if mode == "full":
+        train_split, val_split = "train_full", "validation"
+    elif mode == "search":
+        train_split, val_split = "train", "dev"
+    else:
+        raise ValueError(f"Unknown data.mode '{mode}'.")
 
     train_ds = KITTIMOTS(root, split=train_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
     val_ds   = KITTIMOTS(root, split=val_split, ann_source="txt", seed=seed, split_ratio=split_ratio)
     
-    # Wrap train_ds with tracking augmentations
     if aug_strategy != "no_aug":
         train_ds = ApplyAlbumentationsSegm(train_ds, get_segm_transforms(True, aug_strategy))
         
     classes    = ["Background", "Car", "Pedestrian"]
 
     num_workers = cfg["data"].get("num_workers", 4)
-    train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg["training"].get("val_batch_size", 4), shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    persistent = num_workers > 0
+    train_loader = DataLoader(train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=persistent)
+    val_loader = DataLoader(val_ds, batch_size=cfg["training"].get("val_batch_size", 4), shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True, persistent_workers=persistent)
 
     dataset_wrapper = cfg["data"].get("dataset_wrapper", "kitti_mots").lower()
     
@@ -253,12 +238,24 @@ def setup_model(exp: Exp, data: Data) -> Run:
 
     history = {"train_loss": [], "val_loss": [], "val_dice": []}
 
+    dino_model = None
+    dino_processor = None
+    prompt_type = cfg["training"].get("prompt_type", "bbox")
+    if prompt_type in ["text", "mix"]:
+        dino_id = "IDEA-Research/grounding-dino-tiny"
+        print(f"Initialising GroundingDINO Model: {dino_id}")
+        dino_processor = AutoProcessor.from_pretrained(dino_id)
+        dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(dino_id).to(device)
+        dino_model.eval()
+
     return Run(
         model=model, 
         optimizer=optimizer, 
         history=history, 
         scheduler=scheduler,
-        processor=processor
+        processor=processor,
+        dino_model=dino_model,
+        dino_processor=dino_processor
     )
 
 def _collapse_masks_to_class_union(masks: List[np.ndarray], class_ids: List[int]) -> List[np.ndarray]:
@@ -275,10 +272,12 @@ def _collapse_masks_to_class_union(masks: List[np.ndarray], class_ids: List[int]
     return [class_union[cid].astype(np.uint8) for cid in class_ids]
 
 
-def prepare_batch_for_sam(batch, processor, device, target_mode: str = "instance"):
+def prepare_batch_for_sam(batch, processor, device, target_mode="instance", prompt_type="bbox", is_train=True, dino_model=None, dino_processor=None, text_prompt="pedestrian. car."):
     """Process a raw batch of KITTIMOTS tuples into SAM inputs."""
     images = []
     batched_input_boxes = []
+    batched_input_points = []
+    batched_input_labels = []
     raw_masks_list = []
     num_boxes = []
     
@@ -287,51 +286,135 @@ def prepare_batch_for_sam(batch, processor, device, target_mode: str = "instance
     valid_targets_list = []
     valid_metas_list = []
     
-    for img_pil, anns, meta in zip(images_list, targets_list, metas_list):
+    batch_dino_results = [None] * len(images_list)
+    if prompt_type == "text" and dino_model is not None and dino_processor is not None:
+        with torch.no_grad():
+            try:
+                parsed_text = [lbl.strip() for lbl in text_prompt.rstrip(".").split(".") if lbl.strip()]
+                dino_inputs = dino_processor(images=images_list, text=[parsed_text] * len(images_list), return_tensors="pt").to(device)
+            except Exception:
+                dino_inputs = dino_processor(images=images_list, text=[text_prompt] * len(images_list), return_tensors="pt").to(device)
+            
+            dino_outputs = dino_model(**dino_inputs)
+            batch_dino_results = dino_processor.post_process_grounded_object_detection(
+                dino_outputs, dino_inputs.input_ids, threshold=0.35, text_threshold=0.25, target_sizes=[img.size[::-1] for img in images_list]
+            )
+
+    for batch_idx, (img_pil, anns, meta) in enumerate(zip(images_list, targets_list, metas_list)):
         img_np = np.array(img_pil)
         
         boxes = []
+        points = []
+        labels = []
         masks = []
         class_ids = []
         for ann in anns:
             boxes.append(ann.bbox_xyxy)
+            x1, y1, x2, y2 = ann.bbox_xyxy
+            center_x = (x1 + x2) / 2.0
+            center_y = (y1 + y2) / 2.0
+            points.append([[center_x, center_y]])
+            labels.append([1])
             masks.append(rletools.decode(ann.mask_rle).astype(np.uint8))
             class_ids.append(ann.class_id)
 
         if target_mode == "semantic":
             masks = _collapse_masks_to_class_union(masks, class_ids)
             
+        if prompt_type == "text" and batch_dino_results[batch_idx] is not None:
+            dino_results = batch_dino_results[batch_idx]
+            dino_boxes = dino_results.get("boxes", torch.empty(0, 4)).cpu().tolist()
+            dino_labels_str = dino_results.get("text_labels", dino_results.get("labels", []))
+            
+            if is_train:
+                gt_boxes_tensor = torch.tensor(boxes, dtype=torch.float)
+                dino_boxes_tensor = torch.tensor(dino_boxes, dtype=torch.float) if len(dino_boxes) > 0 else torch.zeros((0, 4))
+                matched_masks = []
+                chosen_boxes = []
+                
+                if len(dino_boxes) > 0 and len(boxes) > 0:
+                    ious = box_iou(dino_boxes_tensor, gt_boxes_tensor)
+                    max_iou, max_idx = ious.max(dim=1)
+                    for idx, (iou, gt_idx) in enumerate(zip(max_iou.tolist(), max_idx.tolist())):
+                        chosen_boxes.append(dino_boxes[idx])
+                        if iou > 0.5:
+                            matched_masks.append(masks[gt_idx])
+                        else:
+                            matched_masks.append(np.zeros_like(masks[0]))
+                elif len(dino_boxes) > 0:
+                    for b in dino_boxes:
+                        chosen_boxes.append(b)
+                        matched_masks.append(np.zeros_like(np.array(img_pil))[:,:,0] if len(np.array(img_pil).shape)==3 else np.zeros_like(img_pil))
+                
+                boxes = chosen_boxes
+                masks = matched_masks
+            else:
+                boxes = dino_boxes
+                masks = None
+                fake_anns = []
+                for b, lbl_str in zip(dino_boxes, dino_labels_str):
+                    lbl_lower = lbl_str.lower()
+                    cid = 1 if "car" in lbl_lower else 2 if ("person" in lbl_lower or "pedestrian" in lbl_lower) else 0
+                    if cid > 0:
+                        fake_anns.append(InstanceAnn(object_id=0, class_id=cid, instance_id=0, mask_rle={}, bbox_xyxy=b))
+                anns = fake_anns
+
         if len(boxes) == 0:
             continue
             
         images.append(img_np)
         batched_input_boxes.append([boxes])
-        raw_masks_list.append(torch.tensor(np.stack(masks), dtype=torch.float32))
+        batched_input_points.append([points])
+        batched_input_labels.append([labels])
+        if masks is not None:
+            raw_masks_list.append(torch.tensor(np.stack(masks), dtype=torch.float32))
+        else:
+            raw_masks_list.append(None)
         num_boxes.append(len(boxes))
         valid_targets_list.append(anns)
         valid_metas_list.append(meta)
 
     if len(images) == 0:
-        return None, None, None, None, None, None, None, None
-        
-    # SamProcessor expects homogeneously sized lists or crashes when converting to np.array internally
+        return None, None, None, None, None, None, None
+
     max_boxes = max(num_boxes)
-    for boxes in batched_input_boxes:
-        while len(boxes[0]) < max_boxes:
-            boxes[0].append([0, 0, 0, 0])
+    if prompt_type in ("bbox", "text"):
+        for boxes_i in batched_input_boxes:
+            while len(boxes_i[0]) < max_boxes:
+                boxes_i[0].append([0, 0, 0, 0])
+                
+        inputs = processor(
+            images=images,
+            input_boxes=batched_input_boxes,
+            return_tensors="pt"
+        )
+    elif prompt_type == "point":
+        for pts, lbs in zip(batched_input_points, batched_input_labels):
+            while len(pts[0]) < max_boxes:
+                pts[0].append([[0, 0]])
+                lbs[0].append([0])
+                
+        inputs = processor(
+            images=images,
+            input_points=batched_input_points,
+            input_labels=batched_input_labels,
+            return_tensors="pt"
+        )
+    else:
+        raise ValueError(f"Unknown prompt_type: {prompt_type}")
+    
+    original_sizes = inputs.pop("original_sizes").to(device)
+    reshaped_input_sizes = inputs.pop("reshaped_input_sizes").to(device)
+    
+    if "input_points" in inputs:
+        B = len(images)
+        inputs["input_points"] = inputs["input_points"].view(B, max_boxes, 1, 2)
+        if "input_labels" in inputs:
+            inputs["input_labels"] = inputs["input_labels"].view(B, max_boxes, 1)
             
-    inputs = processor(
-        images=images,
-        input_boxes=batched_input_boxes,
-        return_tensors="pt"
-    )
+    sam_kwargs = {k: v.to(device) for k, v in inputs.items()}
     
-    pixel_values = inputs["pixel_values"].to(device)
-    input_boxes = inputs["input_boxes"].to(device)
-    original_sizes = inputs["original_sizes"].to(device)
-    reshaped_input_sizes = inputs["reshaped_input_sizes"].to(device)
-    
-    return pixel_values, input_boxes, raw_masks_list, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes
+    return sam_kwargs, raw_masks_list, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes
 
 
 def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device):
@@ -346,27 +429,25 @@ def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes,
             pred_list.append(None)
             continue
             
-        valid_preds = pred_masks[i, :n].unsqueeze(1) # (n, 1, 256, 256)
+        valid_preds = pred_masks[i, :n].unsqueeze(1)
         orig_h, orig_w = original_sizes[i].tolist()
         reshaped_h, reshaped_w = reshaped_input_sizes[i].tolist()
         
-        # 1) Upsample to 1024x1024
         up_masks = F.interpolate(valid_preds, size=(1024, 1024), mode="bilinear", align_corners=False)
-        # 2) Crop pad
         up_masks = up_masks[..., :reshaped_h, :reshaped_w]
-        # 3) Upsample to original size
         up_masks = F.interpolate(up_masks, size=(orig_h, orig_w), mode="bilinear", align_corners=False).squeeze(1)
         
-        gt_mask = raw_masks[i].float().to(device)
-        pred_list.append(up_masks) # (n, orig_h, orig_w)
-        gt_list.append(gt_mask) # (n, orig_h, orig_w)
+        pred_list.append(up_masks)
         
-        # Compute true IoU for MSE loss
-        with torch.no_grad():
-            pred_bin = (up_masks > 0).float()
-            inter = (pred_bin * gt_mask).sum(dim=(-1, -2))
-            union = pred_bin.sum(dim=(-1, -2)) + gt_mask.sum(dim=(-1, -2)) - inter
-            real_ious.append(inter / (union + 1e-6))
+        if raw_masks is not None and raw_masks[i] is not None:
+            gt_mask = raw_masks[i].float().to(device)
+            gt_list.append(gt_mask)
+            
+            with torch.no_grad():
+                pred_bin = (up_masks > 0).float()
+                inter = (pred_bin * gt_mask).sum(dim=(-1, -2))
+                union = pred_bin.sum(dim=(-1, -2)) + gt_mask.sum(dim=(-1, -2)) - inter
+                real_ious.append(inter / (union + 1e-6))
             
         pred_ious.append(pred_ious_out[i, :n])
 
@@ -384,6 +465,7 @@ def evaluate(
     coco_metrics: Any = None,
     label_map: Dict[int, int] = None,
     target_mode: str = "instance",
+    override_prompt_type: str = None
 ) -> Eval:
     """Evaluates SAM model computing average Dice Loss & BCE and COCO SEG metrics"""
     model = run.model
@@ -397,25 +479,33 @@ def evaluate(
     coco_dt_list = []
     sem_eval = SemanticEvaluator()
     
+    prompt_type = override_prompt_type or exp.cfg["training"].get("prompt_type", "bbox")
+    text_prompt = exp.cfg["training"].get("text_prompt", "pedestrian. car.")
+    
     with torch.no_grad():
         for batch in loader:
-            pixel_values, input_boxes, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
-                batch, run.processor, device, target_mode=target_mode
+            sam_kwargs, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
+                batch, run.processor, device, target_mode=target_mode, prompt_type=prompt_type, is_train=False, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
             )
-            if pixel_values is None:
+            if sam_kwargs is None:
                 continue
             
             with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu'):
                 outputs = model(
-                    pixel_values=pixel_values,
-                    input_boxes=input_boxes,
+                    **sam_kwargs,
                     multimask_output=False
                 )
                 pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d = postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device)
                 
-                loss_seg, loss_bce, loss_dice = seg_loss_fn(pred_1d, gt_1d)
-                loss_iou = F.mse_loss(pred_ious_1d, real_ious_1d)
-                loss = loss_seg + loss_iou
+                if gt_1d.numel() > 0:
+                    loss_seg, loss_bce, loss_dice = seg_loss_fn(pred_1d, gt_1d)
+                    loss_iou = F.mse_loss(pred_ious_1d, real_ious_1d)
+                    loss = loss_seg + loss_iou
+                else:
+                    loss_seg = torch.tensor(0.0)
+                    loss_bce = torch.tensor(0.0)
+                    loss_dice = torch.tensor(0.0)
+                    loss = torch.tensor(0.0)
                 
             total_loss += loss.item()
             total_bce += loss_bce.item()
@@ -461,13 +551,12 @@ def evaluate(
                     if n == 0 or pred_list[i] is None: continue
                     image_id = meta["index"]
                     
-                    mask_logits_i_resized = pred_list[i].cpu() # (n, raw_h, raw_w)
+                    mask_logits_i_resized = pred_list[i].cpu()
                     iou_scores_i = iou_scores_out[i, :n].numpy()
                     
                     pred_binary = (torch.sigmoid(mask_logits_i_resized) > 0.5).numpy().astype(np.uint8)
                     scores = iou_scores_i
                     
-                    # Ensure we don't index past the targets list if augmentations dropped any
                     safe_n = min(n, len(tgt))
                     for j in range(safe_n):
                         cat_id = tgt[j].class_id
@@ -476,7 +565,7 @@ def evaluate(
                         coco_cat_id = coco_metrics.label_map[cat_id]
                         mask_j = np.asfortranarray(pred_binary[j])
                         rle = rletools.encode(mask_j)
-                        rle['counts'] = rle['counts'].decode('utf-8')
+                        rle["counts"] = rle["counts"].decode("utf-8")
                         bbox = rletools.toBbox(rle).tolist()
                         
                         coco_dt_list.append({
@@ -526,28 +615,33 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
     
     print("Starting SAM Mask-Decoder training…")
     
+    prompt_type = exp.cfg["training"].get("prompt_type", "bbox")
+    text_prompt = exp.cfg["training"].get("text_prompt", "pedestrian. car.")
+    
     pbar = tqdm(range(num_epochs), desc="Epochs", ascii=True)
     for epoch in pbar:
-        # Training pass
         run.model.train()
         train_loss_sum = 0.0
         train_bce_sum = 0.0
         train_dice_sum = 0.0
         
         for batch_idx, batch in enumerate(data.train_loader):
-            pixel_values, input_boxes, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
-                batch, run.processor, device, target_mode=target_mode
+            current_prompt_type = prompt_type
+            if prompt_type == "mix":
+                current_prompt_type = np.random.choice(["bbox", "point", "text"])
+                
+            sam_kwargs, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
+                batch, run.processor, device, target_mode=target_mode, prompt_type=current_prompt_type, is_train=True, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
             )
             
-            if pixel_values is None:
+            if sam_kwargs is None:
                 continue
             
             run.optimizer.zero_grad()
             
             with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu'):
                 outputs = run.model(
-                    pixel_values=pixel_values,
-                    input_boxes=input_boxes,
+                    **sam_kwargs,
                     multimask_output=False
                 )
                 pred_1d, gt_1d, _, real_ious_1d, pred_ious_1d = postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes, reshaped_input_sizes, device)
@@ -574,23 +668,49 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_bce = train_bce_sum / max(1, len(data.train_loader))
         train_dice = train_dice_sum / max(1, len(data.train_loader))
         
-        # Evaluation pass
         print(f"Evaluating epoch {epoch + 1}/{num_epochs}")
-        eval_result = evaluate(
-            exp,
-            run,
-            data.val_loader,
-            data.val_coco_metrics,
-            label_map=data.label_mapping,
-            target_mode=target_mode,
-        )
+        prompt_types_to_eval = ["bbox", "point", "text"] if prompt_type == "mix" else [prompt_type]
+        aggregated_metrics = {}
+        all_eval_results = []
         
-        # Validation Metrics
-        val_segm_ap = eval_result.metrics.get("overall/AP_segm", 0.0) 
-        val_sem_miou = eval_result.metrics.get("semantic/mIoU", 0.0)
-        val_loss = eval_result.metrics.get("loss", 0.0)
-        val_bce = eval_result.metrics.get("loss_bce", 0.0)
-        val_dice = eval_result.metrics.get("loss_dice", 0.0)
+        for p_type in prompt_types_to_eval:
+            if len(prompt_types_to_eval) > 1:
+                print(f"  -> Evaluating with prompt: {p_type}")
+            res = evaluate(
+                exp, 
+                run, 
+                data.val_loader, 
+                data.val_coco_metrics, 
+                label_map=data.label_mapping,
+                target_mode=target_mode,
+                override_prompt_type=p_type
+            )
+            all_eval_results.append((p_type, res))
+            
+            for k, v in res.metrics.items():
+                if len(prompt_types_to_eval) > 1:
+                    aggregated_metrics[f"{p_type}_{k}"] = v
+                else:
+                    aggregated_metrics[k] = v
+
+        if len(prompt_types_to_eval) > 1:
+            val_segm_ap = sum(r.metrics.get("overall/AP_segm", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_sem_miou = sum(r.metrics.get("semantic/mIoU", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_loss = sum(r.metrics.get("loss", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_bce = sum(r.metrics.get("loss_bce", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_dice = sum(r.metrics.get("loss_dice", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            
+            aggregated_metrics["overall/AP_segm"] = val_segm_ap
+            aggregated_metrics["semantic/mIoU"] = val_sem_miou
+            aggregated_metrics["loss"] = val_loss
+            aggregated_metrics["loss_bce"] = val_bce
+            aggregated_metrics["loss_dice"] = val_dice
+        else:
+            val_segm_ap = aggregated_metrics.get("overall/AP_segm", 0.0)
+            val_sem_miou = aggregated_metrics.get("semantic/mIoU", 0.0)
+            val_loss = aggregated_metrics.get("loss", 0.0)
+            val_bce = aggregated_metrics.get("loss_bce", 0.0)
+            val_dice = aggregated_metrics.get("loss_dice", 0.0)
         
         run.history["train_loss"].append(train_loss)
         
@@ -600,7 +720,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             torch.save(run.model.state_dict(), exp.best_model_path)
             
             with open(os.path.join(exp.output_dir, "best_metrics.json"), "w") as fh:
-                json.dump(eval_result.metrics, fh, indent=4)
+                json.dump(aggregated_metrics, fh, indent=4)
             best_name = "semantic mIoU" if target_mode == "semantic" else "COCO AP_segm"
             print(f"  >>> New best: {best_name} {run.best_map:.4f} at epoch {epoch + 1}")
             
@@ -623,16 +743,16 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             "best_map_segm": run.best_map, 
             "best_epoch": run.best_epoch
         }
-        wandb_log.update({f"val_{k}": v for k, v in eval_result.metrics.items()})
+        wandb_log.update({f"val_{k}": v for k, v in aggregated_metrics.items()})
         wandb.log(wandb_log)
 
         csv_path = os.path.join(exp.output_dir, "metrics_history.csv")
         write_header = not os.path.isfile(csv_path)
-        headers = ["epoch", "train_loss", "best_map_segm"] + [f"val_{k}" for k in eval_result.metrics.keys()]
+        headers = ["epoch", "train_loss", "best_map_segm"] + [f"val_{k}" for k in aggregated_metrics.keys()]
         
         with open(csv_path, "a") as fh:
             if write_header: fh.write(",".join(headers) + "\n")
-            row = [str(epoch + 1), f"{train_loss:.6f}", f"{run.best_map:.6f}"] + [f"{v:.6f}" for v in eval_result.metrics.values()]
+            row = [str(epoch + 1), f"{train_loss:.6f}", f"{run.best_map:.6f}"] + [f"{v:.6f}" for v in aggregated_metrics.values()]
             fh.write(",".join(row) + "\n")
             
         if run.scheduler is not None:

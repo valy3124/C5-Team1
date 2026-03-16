@@ -12,6 +12,16 @@ from transformers import (
 )
 
 
+# Map text labels produced by GroundingDINO → COCO category IDs used in KITTI-MOTS
+# (person=1, car=3).  Add more entries here if needed.
+_LABEL_TO_COCO_CAT: dict = {
+    "person":     1,
+    "pedestrian": 1,
+    "car":        3,
+    "vehicle":    3,
+}
+
+
 class GroundedSamWrapper:
     """
     Grounded SAM: combines GroundingDINO (text-prompted object detector) with
@@ -127,28 +137,41 @@ class GroundedSamWrapper:
         self,
         image: Image.Image,
         prompt_dict: Dict[str, Any],
-    ) -> Tuple[List[torch.Tensor], torch.Tensor, float]:
+    ) -> Tuple[List[torch.Tensor], torch.Tensor, float, List[List[float]], List[int]]:
         """
-        Run Grounded SAM inference.
+        Returns
+        -------
+        ``([masks_tensor], scores_tensor, inference_time, dino_boxes, coco_cat_ids)``
+
+        The 5-value signature matches ``YoloSamWrapper`` so that
+        ``run_inference.py`` handles both wrappers identically.
+        ``coco_cat_ids[i]`` is the COCO category id for the i-th detected box
+        (person=1, car=3), inferred from the GroundingDINO label.
         """
         t_start = time.time()
 
         text_labels = prompt_dict.get("text", "person. car.")
 
-        # Step 1: GroundingDINO: detect boxes from text
-        boxes, det_scores, _det_labels = self._run_grounding_dino(image, text_labels)
+        # Step 1: GroundingDINO — detect boxes and recover per-box text labels
+        boxes, det_scores, det_labels = self._run_grounding_dino(image, text_labels)
 
-        # Step 2: SAM: segment using detected boxes
+        # Step 2: SAM — segment using detected boxes
         if len(boxes) == 0:
             h, w = image.size[1], image.size[0]
-            empty_masks   = torch.zeros((1, 0, 3, h, w), dtype=torch.bool)
-            empty_scores  = torch.zeros((1, 0, 1))
-            return [empty_masks], empty_scores, time.time() - t_start
+            empty_masks  = torch.zeros((1, 0, 3, h, w), dtype=torch.bool)
+            empty_scores = torch.zeros((1, 0, 1))
+            return [empty_masks], empty_scores, time.time() - t_start, [], []
+
+        # Map each detected label to a COCO category id
+        coco_cat_ids: List[int] = [
+            _LABEL_TO_COCO_CAT.get(lbl.lower().strip(), 1)
+            for lbl in det_labels
+        ]
 
         masks_tensor, scores_tensor = self._run_sam(image, boxes, det_scores)
 
         inference_time = time.time() - t_start
-        return [masks_tensor], scores_tensor, inference_time
+        return [masks_tensor], scores_tensor, inference_time, boxes, coco_cat_ids
 
     def predict_semantic(
         self,
@@ -283,7 +306,7 @@ class GroundedSamWrapper:
         self,
         image: Image.Image,
         text_labels: str,
-    ) -> Tuple[List[List[float]], List[float]]:
+    ) -> Tuple[List[List[float]], List[float], List[str]]:
         """
         Run GroundingDINO on *image* with *text_labels*.
 
@@ -293,6 +316,8 @@ class GroundedSamWrapper:
             Detected boxes in ``[x_min, y_min, x_max, y_max]`` pixel coords.
         scores : list[float]
             Corresponding confidence scores.
+        labels : list[str]
+            Detected text label for each box (e.g. ``"person"`` or ``"car"``).
         """
         try:
             inputs = self.dino_processor(
@@ -317,10 +342,10 @@ class GroundedSamWrapper:
             target_sizes=[image.size[::-1]],
         )
 
-        result  = results[0]
-        boxes   = result["boxes"].cpu().tolist()
-        scores  = result["scores"].cpu().tolist()
-        labels  = result.get("labels", ["" for _ in boxes])
+        result = results[0]
+        boxes  = result["boxes"].cpu().tolist()
+        scores = result["scores"].cpu().tolist()
+        labels = result.get("text_labels", [""] * len(boxes))
 
         return boxes, scores, labels
 
