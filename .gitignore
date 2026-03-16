@@ -9,9 +9,14 @@ Week1/src/results/
 Week1/results/
 Week1/runs/
 Week1/src/DEArt/
+Week2/src/results_inference/
+Week2/results_finetune/
+Week2/results_eval/
 *.jsonl
 *.log
 *.out
+*.err
+*.jpg
 
 # Weights & Biases local files
 wandb/
