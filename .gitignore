@@ -12,6 +12,7 @@ Week1/src/DEArt/
 Week2/src/results_inference/
 Week2/results_finetune/
 Week2/results_eval/
+Week3/dataset/
 *.jsonl
 *.log
 *.out
