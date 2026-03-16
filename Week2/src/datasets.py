@@ -249,20 +249,22 @@ class DEART:
       (PIL.Image RGB, list[InstanceAnn])
     """
     
-    # They are mapped to COCO Class 1 (Person)
+    # Each class gets a unique ID for per-class evaluation.
+    # They are all human-like figures (person super-class in DeART).
     LABELS_MAPPING = {
-        "angel": 1,
-        "centaur": 1,     
-        "crucifixion": 1,      
-        "devil": 1,
-        "god the father": 1,   
-        "judith": 1,          
-        "knight": 1,          
-        "monk": 1,            
-        "nude": 1,             
-        "person": 1, # The standard human class
-        "shepherd": 1,
+        "angel":          1,
+        "centaur":        2,
+        "crucifixion":    3,
+        "devil":          4,
+        "god the father": 5,
+        "judith":         6,
+        "knight":         7,
+        "monk":           8,
+        "nude":           9,
+        "person":        10,   # The standard human class
+        "shepherd":      11,
     }
+    CLASS_ID_TO_NAME: Dict[int, str] = {v: k for k, v in LABELS_MAPPING.items()}
 
     def __init__(
         self,
@@ -308,9 +310,11 @@ class DEART:
         sub_dev_ids = set(all_image_ids[n_train:])
 
         if self.split == "train":
-            self.target_ids = list(sub_train_ids)
+            # Preserve deterministic shuffled order from all_image_ids.
+            self.target_ids = [img_id for img_id in all_image_ids if img_id in sub_train_ids]
         elif self.split in ["dev", "validation"]:
-            self.target_ids = list(sub_dev_ids)
+            # Preserve deterministic shuffled order from all_image_ids.
+            self.target_ids = [img_id for img_id in all_image_ids if img_id in sub_dev_ids]
         elif self.split == "train_full":
             self.target_ids = all_image_ids
         else:
