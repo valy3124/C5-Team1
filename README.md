@@ -30,10 +30,9 @@ pip install -r requirements.txt
 ```
 
 ---
-
 ## Weekly Modules
 
 The project is structured by weeks. Each week has its own directory and a `README.md` with specific execution scripts and structural details.
 
-- **[Week 1: Object Detection and Fine-Tuning](./Week1/)** — Fine-tuning DETR, Faster R-CNN, RT-DETR, and YOLO models on KITTI-MOTS and DeART datasets.
-- **[Week 2: Object Segmentation](./Week2/)** — We use GroundingDINO and the Segment Anything Model (SAM) for semantic segmentation, as well as SAM mask decoder fine-tuning.
+- **[Week 1: Object Detection and Fine-Tuning](./Week1/)** — Fine-tuning DETR, Faster R-CNN, RT-DETR, and YOLO models on KITTI-MOTS and DeART datasets. [[Presentation Slides](https://docs.google.com/presentation/d/1pQo0dwwll2tevjgwq-N43lQPMC7QERJxPskVBMaRBcE/edit?usp=sharing)]
+- **[Week 2: Object Segmentation](./Week2/)** — We use GroundingDINO and the Segment Anything Model (SAM) for semantic segmentation, as well as SAM mask decoder fine-tuning. [[Presentation Slides](https://docs.google.com/presentation/d/12WzEByRW7whFWQhqM0sJtqvmaaphdbwX1eZevyEXaXk/edit?usp=sharing)]
