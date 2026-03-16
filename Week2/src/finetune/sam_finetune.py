@@ -32,7 +32,8 @@ from Week2.src.finetune.utils import (
     setup_experiment, build_scheduler, get_common_parser
 )
 from Week2.src.inference.evaluation_segm import CocoSegmentationMetrics
-from typing import Any
+from Week2.src.inference.evaluation_semantic import SemanticEvaluator, CLASS_NAMES
+from typing import Any, Dict, List
 import PIL.Image as Image
 # -----------------------------------------------------------------------------
 # SAM Custom Dataset & Collate
@@ -218,7 +219,7 @@ def setup_data(exp: Exp) -> Data:
 
     print(f"Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
 
-    return Data(classes, train_loader, val_loader, None, val_coco_metrics, None)
+    return Data(classes, train_loader, val_loader, None, val_coco_metrics, train_ds.LABELS_MAPPING)
 
 def setup_model(exp: Exp, data: Data) -> Run:
     cfg = exp.cfg
@@ -260,7 +261,21 @@ def setup_model(exp: Exp, data: Data) -> Run:
         processor=processor
     )
 
-def prepare_batch_for_sam(batch, processor, device):
+def _collapse_masks_to_class_union(masks: List[np.ndarray], class_ids: List[int]) -> List[np.ndarray]:
+    """Replace instance masks with class-union masks so same-class objects share one pixel target."""
+    if not masks:
+        return masks
+
+    class_union: Dict[int, np.ndarray] = {}
+    for m, cid in zip(masks, class_ids):
+        if cid not in class_union:
+            class_union[cid] = np.zeros_like(m, dtype=bool)
+        class_union[cid] |= m.astype(bool)
+
+    return [class_union[cid].astype(np.uint8) for cid in class_ids]
+
+
+def prepare_batch_for_sam(batch, processor, device, target_mode: str = "instance"):
     """Process a raw batch of KITTIMOTS tuples into SAM inputs."""
     images = []
     batched_input_boxes = []
@@ -277,9 +292,14 @@ def prepare_batch_for_sam(batch, processor, device):
         
         boxes = []
         masks = []
+        class_ids = []
         for ann in anns:
             boxes.append(ann.bbox_xyxy)
             masks.append(rletools.decode(ann.mask_rle).astype(np.uint8))
+            class_ids.append(ann.class_id)
+
+        if target_mode == "semantic":
+            masks = _collapse_masks_to_class_union(masks, class_ids)
             
         if len(boxes) == 0:
             continue
@@ -357,7 +377,14 @@ def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes,
 
     return pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d
 
-def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -> Eval:
+def evaluate(
+    exp: Exp,
+    run: Run,
+    loader: DataLoader,
+    coco_metrics: Any = None,
+    label_map: Dict[int, int] = None,
+    target_mode: str = "instance",
+) -> Eval:
     """Evaluates SAM model computing average Dice Loss & BCE and COCO SEG metrics"""
     model = run.model
     device = exp.device
@@ -368,10 +395,13 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
     total_dice = 0.0
     seg_loss_fn = DiceBCELoss()
     coco_dt_list = []
+    sem_eval = SemanticEvaluator()
     
     with torch.no_grad():
         for batch in loader:
-            pixel_values, input_boxes, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device)
+            pixel_values, input_boxes, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
+                batch, run.processor, device, target_mode=target_mode
+            )
             if pixel_values is None:
                 continue
             
@@ -390,6 +420,40 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
             total_loss += loss.item()
             total_bce += loss_bce.item()
             total_dice += loss_dice.item()
+
+            if label_map is not None:
+                iou_scores_out = outputs.iou_scores.view(len(num_boxes), -1).cpu()
+                for i, (n, tgt) in enumerate(zip(num_boxes, valid_targets_list)):
+                    if n == 0 or pred_list[i] is None:
+                        continue
+
+                    safe_n = min(n, len(tgt))
+                    if safe_n == 0:
+                        continue
+
+                    pred_logits_i = pred_list[i][:safe_n].cpu()  # (n, H, W)
+                    pred_scores_i = iou_scores_out[i, :safe_n].numpy()
+                    pred_binary_i = (torch.sigmoid(pred_logits_i) > 0.5).numpy().astype(np.uint8)
+
+                    h_i, w_i = pred_binary_i.shape[-2:]
+                    pred_sem = np.zeros((h_i, w_i), dtype=np.int32)
+                    gt_sem = np.zeros((h_i, w_i), dtype=np.int32)
+
+                    # Build GT semantic map from instance masks
+                    for ann in tgt[:safe_n]:
+                        if ann.class_id not in label_map:
+                            continue
+                        gt_mask = rletools.decode(ann.mask_rle).astype(bool)
+                        gt_sem[gt_mask] = label_map[ann.class_id]
+
+                    # Merge predicted instance masks into semantic map
+                    for j in np.argsort(pred_scores_i):
+                        ann = tgt[j]
+                        if ann.class_id not in label_map:
+                            continue
+                        pred_sem[pred_binary_i[j].astype(bool)] = label_map[ann.class_id]
+
+                    sem_eval.update(pred_sem, gt_sem)
 
             if coco_metrics is not None:
                 iou_scores_out = outputs.iou_scores.view(len(num_boxes), -1).cpu()
@@ -440,12 +504,22 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None) -
         metrics["dice"] = metrics.get("overall/AP_segm", 0.0)
     else:
         metrics["dice"] = avg_loss
+
+    sem_metrics = sem_eval.compute()
+    metrics["semantic/mIoU"] = sem_metrics.get("overall/mIoU", float("nan"))
+    for cid, cname in CLASS_NAMES.items():
+        if cid == 0:
+            continue
+        key = f"{cname}/IoU"
+        if key in sem_metrics:
+            metrics[f"semantic/{cname}_IoU"] = sem_metrics[key]
     
     return Eval(predictions=coco_dt_list, metrics=metrics, inference_fps=0, inference_latency_ms=0)
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
     num_epochs = exp.cfg["training"]["epochs"]
     device = exp.device
+    target_mode = exp.cfg["training"].get("target_mode", "instance")
     
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu')
     seg_loss_fn = DiceBCELoss()
@@ -461,7 +535,9 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_dice_sum = 0.0
         
         for batch_idx, batch in enumerate(data.train_loader):
-            pixel_values, input_boxes, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(batch, run.processor, device)
+            pixel_values, input_boxes, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
+                batch, run.processor, device, target_mode=target_mode
+            )
             
             if pixel_values is None:
                 continue
@@ -500,25 +576,39 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         
         # Evaluation pass
         print(f"Evaluating epoch {epoch + 1}/{num_epochs}")
-        eval_result = evaluate(exp, run, data.val_loader, data.val_coco_metrics)
+        eval_result = evaluate(
+            exp,
+            run,
+            data.val_loader,
+            data.val_coco_metrics,
+            label_map=data.label_mapping,
+            target_mode=target_mode,
+        )
         
         # Validation Metrics
         val_segm_ap = eval_result.metrics.get("overall/AP_segm", 0.0) 
+        val_sem_miou = eval_result.metrics.get("semantic/mIoU", 0.0)
         val_loss = eval_result.metrics.get("loss", 0.0)
         val_bce = eval_result.metrics.get("loss_bce", 0.0)
         val_dice = eval_result.metrics.get("loss_dice", 0.0)
         
         run.history["train_loss"].append(train_loss)
         
-        if val_segm_ap > run.best_map:
-            run.best_map, run.best_epoch = val_segm_ap, epoch
+        best_score = val_sem_miou if target_mode == "semantic" else val_segm_ap
+        if best_score > run.best_map:
+            run.best_map, run.best_epoch = best_score, epoch
             torch.save(run.model.state_dict(), exp.best_model_path)
             
             with open(os.path.join(exp.output_dir, "best_metrics.json"), "w") as fh:
                 json.dump(eval_result.metrics, fh, indent=4)
-            print(f"  >>> New best: COCO AP_segm {run.best_map:.4f} at epoch {epoch + 1}")
+            best_name = "semantic mIoU" if target_mode == "semantic" else "COCO AP_segm"
+            print(f"  >>> New best: {best_name} {run.best_map:.4f} at epoch {epoch + 1}")
             
-        print(f"Epoch {epoch + 1}/{num_epochs} | train_loss: {train_loss:.4f} val_loss: {val_loss:.4f} val_COCO_AP_segm: {val_segm_ap:.4f}")
+        print(
+            f"Epoch {epoch + 1}/{num_epochs} | train_loss: {train_loss:.4f} "
+            f"val_loss: {val_loss:.4f} val_COCO_AP_segm: {val_segm_ap:.4f} "
+            f"val_sem_mIoU: {val_sem_miou:.4f}"
+        )
 
         wandb_log = {
             "epoch": epoch + 1, 
@@ -529,6 +619,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             "val_bce": val_bce,
             "val_dice": val_dice,
             "map_segm": val_segm_ap,
+            "val_sem_mIoU": val_sem_miou,
             "best_map_segm": run.best_map, 
             "best_epoch": run.best_epoch
         }
@@ -547,12 +638,15 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         if run.scheduler is not None:
             run.scheduler.step()
             
-    print(f"Training complete. Best COCO AP_segm: {run.best_map:.4f} at epoch {run.best_epoch + 1}.")
+    target_mode = exp.cfg["training"].get("target_mode", "instance")
+    best_name = "semantic mIoU" if target_mode == "semantic" else "COCO AP_segm"
+    print(f"Training complete. Best {best_name}: {run.best_map:.4f} at epoch {run.best_epoch + 1}.")
     return run
 
 def main(args):
     print("Setting up experiment...")
     exp  = setup_experiment(args.config, args)
+    exp.cfg.setdefault("training", {})["target_mode"] = args.target_mode
     print("Setting up data...")
     data = setup_data(exp)
     print("Setting up model...")
@@ -564,4 +658,11 @@ def main(args):
 
 if __name__ == "__main__":
     parser = get_common_parser("Fine-tune SAM on KITTI-MOTS.")
+    parser.add_argument(
+        "--target_mode",
+        type=str,
+        choices=["instance", "semantic"],
+        default="semantic",
+        help="instance: train on per-instance masks; semantic: collapse same-class objects to shared pixel targets.",
+    )
     main(parser.parse_args())
