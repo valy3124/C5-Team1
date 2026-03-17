@@ -55,23 +55,52 @@ class VizWizDataset(Dataset):
                 self.image_captions[img_id].append(ann['caption'])
                 
             # Keep only images that have at least one valid caption
-            self.valid_image_ids = list(self.image_captions.keys())
+            self.valid_image_ids = sorted(list(self.image_captions.keys()))
         else:
-            self.valid_image_ids = list(self.images.keys())
+            self.valid_image_ids = sorted(list(self.images.keys()))
             
-        if self.mode == "search" and self.split == "train":
-            random.seed(42)  # Fixed seed for reproducibility across search experiments
-            num_samples = int(len(self.valid_image_ids) * 0.1) # 10% of the data
-            self.valid_image_ids = random.sample(self.valid_image_ids, num_samples)
-            print(f"[{split} | {mode}] Using subset of {len(self.valid_image_ids)} images.")
+        if self.mode == "search":
+            random.seed(42)
+            # Shuffle the IDs once with fixed seed so splits are consistent
+            random.shuffle(self.valid_image_ids)
+            
+            if self.split == "train_search":
+                num_samples = int(len(self.valid_image_ids) * 0.9)
+                self.valid_image_ids = self.valid_image_ids[:num_samples]
+                print(f"[{split} | {mode}] Using 90% subset: {len(self.valid_image_ids)} images.")
+            elif self.split == "val_search":
+                num_samples = int(len(self.valid_image_ids) * 0.9)
+                self.valid_image_ids = self.valid_image_ids[num_samples:]
+                print(f"[{split} | {mode}] Using 10% subset: {len(self.valid_image_ids)} images.")
+            else:
+                num_samples = int(len(self.valid_image_ids) * 0.1)
+                self.valid_image_ids = self.valid_image_ids[:num_samples]
+                print(f"[{split} | {mode}] Using generic 10% subset: {len(self.valid_image_ids)} images.")
         else:
             print(f"[{split} | {mode}] Using all {len(self.valid_image_ids)} images.")
+
+        # Create samples list
+        self.samples = []
+        if self.split == 'test':
+            for img_id in self.valid_image_ids:
+                self.samples.append((img_id, None))
+        elif 'val' in self.split or self.split == 'validation':
+            # For validation, we use 1 sample per image (for loss) but keep access to all captions (for metrics)
+            for img_id in self.valid_image_ids:
+                self.samples.append((img_id, 0)) # Use first caption for loss
+        else:
+            # For training, treat each valid caption as a separate sample
+            for img_id in self.valid_image_ids:
+                for cap_idx in range(len(self.image_captions[img_id])):
+                    self.samples.append((img_id, cap_idx))
+        
+        print(f"[{split}] Dataset initialized with {len(self.samples)} samples.")
             
     def __len__(self):
-        return len(self.valid_image_ids)
+        return len(self.samples)
         
     def __getitem__(self, idx):
-        img_id = self.valid_image_ids[idx]
+        img_id, cap_idx = self.samples[idx]
         img_name = self.images[img_id]
         
         # Load and process image
@@ -80,11 +109,10 @@ class VizWizDataset(Dataset):
         img = self.img_proc(img)
         
         if self.split == 'test':
-            return img, img_id
+            return img, img_id, img_name
             
-        # Select a random valid caption for this image
-        captions = self.image_captions[img_id]
-        caption = random.choice(captions)
+        # Select the specific caption for this sample
+        caption = self.image_captions[img_id][cap_idx]
         
         # Process caption to character sequence
         cap_list = list(caption)
@@ -103,4 +131,4 @@ class VizWizDataset(Dataset):
             
         cap_idx = [char2idx[char] for char in final_list]
         
-        return img, torch.tensor(cap_idx, dtype=torch.long)
+        return img, torch.tensor(cap_idx, dtype=torch.long), img_name

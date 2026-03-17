@@ -1,26 +1,15 @@
-program: train.py
+model:
+  encoder: "resnet18"
+
+training:
+  epochs: 50
+  batch_size: 128
+  lr: 0.0005
+  scheduler: "plateau"
+  num_workers: 4
+
+data:
+  mode: "search"
+
 project: "C5-ImageCaptioning"
-method: grid
-metric:
-  name: METEOR
-  goal: maximize
-parameters:
-  encoder:
-    values: ["resnet18"]
-  mode:
-    value: "search"
-  epochs:
-    value: 5
-  batch_size:
-    value: 32
-  lr:
-    value: 1e-3
-  num_workers:
-    value: 4
-  output_dir:
-    value: "results/checkpoints"
-command:
-  - ${env}
-  - ${interpreter}
-  - ${program}
-  - ${args}
+output_dir: "results/baseline"

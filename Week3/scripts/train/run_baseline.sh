@@ -17,11 +17,6 @@ mkdir -p logs results/checkpoints
 echo "Starting baseline training on node: $HOSTNAME"
 echo "Using GPU: $CUDA_VISIBLE_DEVICES"
 
-python train.py \
-    --encoder resnet18 \
-    --mode search \
-    --epochs 5 \
-    --batch_size 32 \
-    --lr 1e-3
+python train.py --config configs/baseline.yaml
 
 echo "Baseline training complete!"

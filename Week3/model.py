@@ -48,28 +48,37 @@ class ImageCaptioningModel(nn.Module):
             return self.encoder(img).pooler_output.flatten(1)  # (B, enc_dim)
         return self.encoder(img).flatten(1)                    # (B, 512)
 
-    def forward(self, img):
+    def forward(self, img, target_caption=None):
         batch_size = img.shape[0]
         device = img.device
 
-        # Encode image → (B, GRU_DIM)
+        # Encode image → (1, B, GRU_DIM)
         feat = self._extract_features(img)
         feat = self.encoder_proj(feat)
         hidden = feat.unsqueeze(0)  # (1, B, GRU_DIM)
 
-        # Initialize decoder with <SOS>
-        start = torch.tensor(char2idx['<SOS>'], device=device)
-        inp = self.embed(start).repeat(batch_size, 1).unsqueeze(0)  # (1, B, GRU_DIM)
+        if target_caption is not None:
+            # --- Training Mode (Teacher Forcing): O(N) ---
+            # Input: <SOS> token and all caption characters except the last one
+            inp_seq = self.embed(target_caption[:, :-1]) # (B, TEXT_MAX_LEN-1, GRU_DIM)
+            inp_seq = inp_seq.permute(1, 0, 2)           # (TEXT_MAX_LEN-1, B, GRU_DIM)
+            
+            output, _ = self.gru(inp_seq, hidden)        # (TEXT_MAX_LEN-1, B, GRU_DIM)
+            res = self.proj(output.permute(1, 0, 2))      # (B, TEXT_MAX_LEN-1, NUM_CHAR)
+            return res.permute(0, 2, 1)                  # (B, NUM_CHAR, TEXT_MAX_LEN-1)
+        else:
+            # --- Inference Mode (Auto-regressive): O(N) ---
+            curr_token = torch.full((batch_size,), char2idx['<SOS>'], device=device, dtype=torch.long)
+            all_preds = []
 
-        # Generative loop: progressively build the full output sequence
-        for _ in range(TEXT_MAX_LEN - 1):
-            out, hidden = self.gru(inp, hidden)
-            inp = torch.cat((inp, out[-1:]), dim=0)  # (t+2, B, GRU_DIM)
-
-        res = inp.permute(1, 0, 2)  # (B, TEXT_MAX_LEN, GRU_DIM)
-        res = self.proj(res)         # (B, TEXT_MAX_LEN, NUM_CHAR)
-        res = res.permute(0, 2, 1)  # (B, NUM_CHAR, TEXT_MAX_LEN)
-        return res
+            for _ in range(TEXT_MAX_LEN - 1):
+                inp = self.embed(curr_token).unsqueeze(0) # (1, B, GRU_DIM)
+                out, hidden = self.gru(inp, hidden)       # (1, B, GRU_DIM)
+                logits = self.proj(out.squeeze(0))        # (B, NUM_CHAR)
+                all_preds.append(logits.unsqueeze(2))     # (B, NUM_CHAR, 1)
+                curr_token = logits.argmax(dim=1)         # Greedy selection
+            
+            return torch.cat(all_preds, dim=2)            # (B, NUM_CHAR, TEXT_MAX_LEN-1)
 
 
 if __name__ == "__main__":
