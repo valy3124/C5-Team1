@@ -1,0 +1,24 @@
+program: train.py
+project: "C5-ImageCaptioning"
+method: grid
+metric:
+  name: BLEU-1
+  goal: maximize
+parameters:
+  encoder:
+    values: ["resnet18", "resnet34", "resnet50", "vgg16", "vgg19"]
+  epochs:
+    value: 5
+  batch_size:
+    value: 32
+  lr:
+    value: 1e-3
+  num_workers:
+    value: 4
+  output_dir:
+    value: "results/checkpoints"
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}

@@ -1,0 +1,26 @@
+program: train.py
+project: "C5-ImageCaptioning"
+method: bayes
+metric:
+  name: BLEU-1
+  goal: maximize
+parameters:
+  encoder:
+    value: "resnet50"        # fix encoder; replace with best from sweep_encoder
+  epochs:
+    value: 5
+  batch_size:
+    values: [16, 32, 64]
+  lr:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-2
+  num_workers:
+    value: 4
+  output_dir:
+    value: "results/checkpoints"
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}
