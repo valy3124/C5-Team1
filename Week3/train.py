@@ -1,4 +1,5 @@
 import os
+import time
 import argparse
 import torch
 from torch import nn
@@ -23,6 +24,13 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 bleu = evaluate.load('bleu')
 rouge = evaluate.load('rouge')
 meteor = evaluate.load('meteor')
+try:
+    cider = evaluate.load('cider')
+    CIDER_AVAILABLE = True
+except Exception as e:
+    cider = None
+    CIDER_AVAILABLE = False
+    print(f"Warning: CIDEr metric unavailable ({e}). CIDEr will not be logged.")
 
 
 def parse_args():
@@ -73,46 +81,77 @@ def eval_epoch(model, dataloader):
     model.eval()
     all_preds = []
     all_refs = []
-    
+    total_images = 0
+    total_inference_time = 0.0  # seconds, model forward only
+    batch_latencies = []         # per-batch forward times (seconds)
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     print("Evaluating...")
+    eval_start = time.perf_counter()
+
     with torch.no_grad():
         for img, caption in tqdm(dataloader, desc="Eval"):
             img = img.to(DEVICE)
-            # caption is shape (batch_size, seq_len)
-            
-            # shape of pred: (batch_size, NUM_CHAR, seq_len)
+
+            # --- time the forward pass only ---
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
             pred = model(img)
-            
-            # Extract argmax to get character indices: (batch_size, seq_len)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t1 = time.perf_counter()
+
+            batch_latencies.append(t1 - t0)
+            total_inference_time += t1 - t0
+            total_images += img.size(0)
+
             pred_indices = pred.argmax(dim=1)
-            
-            # Decode strings line by line
             for b in range(img.size(0)):
                 pred_str = convert_indices_to_string(pred_indices[b])
                 ref_str = convert_indices_to_string(caption[b])
-                
                 all_preds.append(pred_str)
-                # HF evaluate expects a list of list format for references if calculating corpus-level metrics
-                all_refs.append([ref_str]) 
-                
-    # Calculate metrics at the end of epoch
-    # Note: If generated text is empty or too short, BLEU might crash or severely penalize.
+                all_refs.append([ref_str])
+
+    eval_end = time.perf_counter()
+    total_run_latency = eval_end - eval_start
+
+    # --- compute metrics ---
     try:
         bleu1 = bleu.compute(predictions=all_preds, references=all_refs, max_order=1)
         bleu2 = bleu.compute(predictions=all_preds, references=all_refs, max_order=2)
         res_r = rouge.compute(predictions=all_preds, references=all_refs)
         res_m = meteor.compute(predictions=all_preds, references=all_refs)
-        
+        cider_score = 0.0
+        if CIDER_AVAILABLE:
+            cider_score = cider.compute(predictions=all_preds, references=all_refs)['cider'] * 100
+
         metrics = {
-            "BLEU-1": bleu1['bleu'] * 100,
-            "BLEU-2": bleu2['bleu'] * 100,
+            "BLEU-1":  bleu1['bleu'] * 100,
+            "BLEU-2":  bleu2['bleu'] * 100,
             "ROUGE-L": res_r['rougeL'] * 100,
-            "METEOR": res_m['meteor'] * 100
+            "METEOR":  res_m['meteor'] * 100,
+            "CIDEr":   cider_score,
         }
     except Exception as e:
         print(f"Failed computing metrics (possibly empty predictions): {e}")
-        metrics = {"BLEU-1": 0, "BLEU-2": 0, "ROUGE-L": 0, "METEOR": 0}
-        
+        metrics = {"BLEU-1": 0, "BLEU-2": 0, "ROUGE-L": 0, "METEOR": 0, "CIDEr": 0}
+
+    # --- compute metrics ---
+    fps = total_images / total_inference_time if total_inference_time > 0 else 0.0
+    avg_latency_ms = (total_inference_time / len(batch_latencies) * 1000) if batch_latencies else 0.0
+    max_vram_gb = (torch.cuda.max_memory_allocated() / 1024 ** 3) if torch.cuda.is_available() else 0.0
+
+    compute_metrics = {
+        "compute/total_run_latency_s":   round(total_run_latency, 3),
+        "compute/total_inference_time_s": round(total_inference_time, 3),
+        "compute/fps":                   round(fps, 2),
+        "compute/avg_batch_latency_ms":  round(avg_latency_ms, 3),
+        "compute/max_vram_gb":           round(max_vram_gb, 4),
+    }
+    metrics.update(compute_metrics)
     return metrics
 
 def main():
@@ -144,7 +183,10 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     crit = nn.CrossEntropyLoss()
 
-    best_bleu1 = -1.0
+    # METEOR is the primary metric (best correlation with human judgement among available).
+    # CIDEr is also logged. BLEU/ROUGE are secondary.
+    primary_metric_name = "METEOR"
+    best_primary = -1.0
 
     for epoch in range(1, cfg.epochs + 1):
         loss = train_one_epoch(model, optimizer, crit, dataloader_train, epoch)
@@ -152,16 +194,26 @@ def main():
 
         metrics = eval_epoch(model, dataloader_valid)
         print("Validation Metrics:")
-        print(f"BLEU-1: {metrics.get('BLEU-1', 0):.2f}% | BLEU-2: {metrics.get('BLEU-2', 0):.2f}% | "
-              f"ROUGE-L: {metrics.get('ROUGE-L', 0):.2f}% | METEOR: {metrics.get('METEOR', 0):.2f}%")
+        print(f"  BLEU-1: {metrics.get('BLEU-1', 0):.2f}% | BLEU-2: {metrics.get('BLEU-2', 0):.2f}% | "
+              f"ROUGE-L: {metrics.get('ROUGE-L', 0):.2f}% | METEOR: {metrics.get('METEOR', 0):.4f} | "
+              f"CIDEr: {metrics.get('CIDEr', 0):.2f}")
+        print(f"  FPS: {metrics.get('compute/fps', 0):.1f} | "
+              f"Avg batch latency: {metrics.get('compute/avg_batch_latency_ms', 0):.1f}ms | "
+              f"Inference time: {metrics.get('compute/total_inference_time_s', 0):.1f}s | "
+              f"Run latency: {metrics.get('compute/total_run_latency_s', 0):.1f}s | "
+              f"Max VRAM: {metrics.get('compute/max_vram_gb', 0):.3f}GB")
 
         wandb.log({"epoch": epoch, "train_loss": loss, **metrics})
 
-        if metrics.get('BLEU-1', 0) > best_bleu1:
-            best_bleu1 = metrics['BLEU-1']
+        if metrics.get(primary_metric_name, 0) > best_primary:
+            best_primary = metrics[primary_metric_name]
             torch.save(model.state_dict(), ckpt_path)
-            print(f"  -> New best BLEU-1: {best_bleu1:.2f}% — checkpoint saved to {ckpt_path}")
-            wandb.run.summary["best_BLEU-1"] = best_bleu1
+            print(f"  -> New best {primary_metric_name}: {best_primary:.2f} — checkpoint saved to {ckpt_path}")
+            wandb.run.summary[f"best_{primary_metric_name}"] = best_primary
+            # also log compute metrics as run summary on first best
+            for k, v in metrics.items():
+                if k.startswith("compute/"):
+                    wandb.run.summary[k] = v
 
     wandb.finish()
 

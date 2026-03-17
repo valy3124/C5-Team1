@@ -2,7 +2,7 @@ program: train.py
 project: "C5-ImageCaptioning"
 method: grid
 metric:
-  name: BLEU-1
+  name: METEOR
   goal: maximize
 parameters:
   encoder:
