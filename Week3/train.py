@@ -37,6 +37,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train image captioning model on VizWiz')
     parser.add_argument('--encoder',     type=str,   default='resnet18', choices=list(ENCODER_CONFIGS),
                         help='Encoder backbone to use')
+    parser.add_argument('--mode',        type=str,   default='search', choices=['search', 'full'],
+                        help='Dataset mode: search (subset) or full')
     parser.add_argument('--epochs',      type=int,   default=5)
     parser.add_argument('--batch_size',  type=int,   default=32)
     parser.add_argument('--lr',          type=float, default=1e-3)
@@ -60,7 +62,7 @@ def convert_indices_to_string(indices):
 def train_one_epoch(model, optimizer, crit, dataloader, epoch):
     model.train()
     total_loss = 0
-    progress_bar = tqdm(dataloader, desc=f"Training Epoch {epoch}")
+    progress_bar = tqdm(dataloader, desc=f"Training Epoch {epoch}", mininterval=10.0)
     
     for img, caption in progress_bar:
         img, caption = img.to(DEVICE), caption.to(DEVICE)
@@ -73,7 +75,6 @@ def train_one_epoch(model, optimizer, crit, dataloader, epoch):
         optimizer.step()
         
         total_loss += loss.item()
-        progress_bar.set_postfix({'loss': loss.item()})
         
     return total_loss / len(dataloader)
 
@@ -92,7 +93,7 @@ def eval_epoch(model, dataloader):
     eval_start = time.perf_counter()
 
     with torch.no_grad():
-        for img, caption in tqdm(dataloader, desc="Eval"):
+        for img, caption in tqdm(dataloader, desc="Eval", mininterval=10.0):
             img = img.to(DEVICE)
 
             # --- time the forward pass only ---
@@ -164,14 +165,14 @@ def main():
     )
     cfg = wandb.config  # sweep may override args values
 
-    print(f"Config: encoder={cfg.encoder}, lr={cfg.lr}, batch_size={cfg.batch_size}, epochs={cfg.epochs}")
+    print(f"Config: encoder={cfg.encoder}, mode={cfg.mode}, lr={cfg.lr}, batch_size={cfg.batch_size}, epochs={cfg.epochs}")
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     ckpt_path = os.path.join(cfg.output_dir, f"{run.name}.pt")
 
     print("Loading datasets...")
-    dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train")
-    dataset_valid = VizWizDataset(VAL_ANN, VAL_IMG_DIR, split="val")
+    dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train", mode=cfg.mode)
+    dataset_valid = VizWizDataset(VAL_ANN, VAL_IMG_DIR, split="val", mode=cfg.mode)
 
     dataloader_train = DataLoader(dataset_train, batch_size=cfg.batch_size, shuffle=True,
                                   num_workers=cfg.num_workers, drop_last=True)

@@ -15,15 +15,17 @@ char2idx = {v: k for k, v in enumerate(chars)}
 TEXT_MAX_LEN = 201
 
 class VizWizDataset(Dataset):
-    def __init__(self, annotation_file, img_dir, split="train"):
+    def __init__(self, annotation_file, img_dir, split="train", mode="search"):
         """
         Args:
             annotation_file (str): Path to the JSON annotation file.
             img_dir (str): Directory with all the images.
             split (str): 'train', 'val', or 'test'. Test set has no publicly available captions.
+            mode (str): 'search' to use a subset of the dataset, 'full' to use the whole dataset.
         """
         self.img_dir = img_dir
         self.split = split
+        self.mode = mode
         self.max_len = TEXT_MAX_LEN
         
         self.img_proc = torch.nn.Sequential(
@@ -56,6 +58,14 @@ class VizWizDataset(Dataset):
             self.valid_image_ids = list(self.image_captions.keys())
         else:
             self.valid_image_ids = list(self.images.keys())
+            
+        if self.mode == "search" and self.split == "train":
+            random.seed(42)  # Fixed seed for reproducibility across search experiments
+            num_samples = int(len(self.valid_image_ids) * 0.1) # 10% of the data
+            self.valid_image_ids = random.sample(self.valid_image_ids, num_samples)
+            print(f"[{split} | {mode}] Using subset of {len(self.valid_image_ids)} images.")
+        else:
+            print(f"[{split} | {mode}] Using all {len(self.valid_image_ids)} images.")
             
     def __len__(self):
         return len(self.valid_image_ids)
