@@ -4,6 +4,7 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 import time
 import json
 import argparse
+import yaml
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -20,16 +21,15 @@ from model import ImageCaptioningModel, ENCODER_CONFIGS
 
 # --- Paths ---
 DATA_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dataset', 'VizWiz')
-TRAIN_ANN = os.path.join(DATA_BASE_DIR, 'annotations', 'train.json')
-VAL_ANN = os.path.join(DATA_BASE_DIR, 'annotations', 'val.json')
+TRAIN_ANN     = os.path.join(DATA_BASE_DIR, 'annotations', 'train.json')
+VAL_ANN       = os.path.join(DATA_BASE_DIR, 'annotations', 'val.json')
 TRAIN_IMG_DIR = os.path.join(DATA_BASE_DIR, 'images', 'train')
-VAL_IMG_DIR = os.path.join(DATA_BASE_DIR, 'images', 'val')
+VAL_IMG_DIR   = os.path.join(DATA_BASE_DIR, 'images', 'val')
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Load HF evaluate metrics
-bleu = evaluate.load('bleu')
-rouge = evaluate.load('rouge')
+bleu   = evaluate.load('bleu')
+rouge  = evaluate.load('rouge')
 meteor = evaluate.load('meteor')
 try:
     cider = evaluate.load('cider')
@@ -40,48 +40,42 @@ except Exception as e:
     print(f"Warning: CIDEr metric unavailable ({e}). CIDEr will not be logged.")
 
 
-import yaml
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train image captioning model on VizWiz')
-    parser.add_argument('--config',      type=str,   help='Path to YAML config file')
-    parser.add_argument('--encoder',     type=str,   choices=list(ENCODER_CONFIGS),
-                        help='Encoder backbone to use')
-    parser.add_argument('--mode',        type=str,   choices=['search', 'full'],
+    parser.add_argument('--config',      type=str, help='Path to YAML config file')
+    parser.add_argument('--encoder',     type=str, choices=list(ENCODER_CONFIGS))
+    parser.add_argument('--mode',        type=str, choices=['search', 'full'],
                         help='Dataset mode: search (subset) or full')
     parser.add_argument('--epochs',      type=int)
     parser.add_argument('--batch_size',  type=int)
     parser.add_argument('--lr',          type=float)
     parser.add_argument('--num_workers', type=int)
-    parser.add_argument('--output_dir',  type=str,
-                        help='Directory to save best model checkpoint')
-    parser.add_argument('--project',     type=str,
-                        help='W&B project name')
-    
+    parser.add_argument('--output_dir',  type=str)
+    parser.add_argument('--project',     type=str, help='W&B project name')
+
     args = parser.parse_args()
-    
-    # Load YAML if provided
+
     cfg = {}
     if args.config:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
-    
-    # Merge logic (CLI args override YAML)
-    # We flatten or map the nested YAML to the args namespace for simplicity
+
+    # CLI args take priority over YAML; use 'is not None' so numeric 0-values are respected.
     final_cfg = argparse.Namespace()
-    
-    # Default values or YAML values
-    final_cfg.encoder = args.encoder or cfg.get('model', {}).get('encoder', 'resnet18')
-    final_cfg.mode = args.mode or cfg.get('data', {}).get('mode', 'search')
-    final_cfg.epochs = args.epochs or cfg.get('training', {}).get('epochs', 5)
-    final_cfg.batch_size = args.batch_size or cfg.get('training', {}).get('batch_size', 32)
-    final_cfg.lr = args.lr or cfg.get('training', {}).get('lr', 1e-3)
-    final_cfg.num_workers = args.num_workers or cfg.get('training', {}).get('num_workers', 4)
-    final_cfg.output_dir = args.output_dir or cfg.get('output_dir', 'results')
-    final_cfg.project = args.project or cfg.get('project', 'C5-ImageCaptioning')
-    final_cfg.scheduler = cfg.get('training', {}).get('scheduler', 'plateau')
-    
+    final_cfg.encoder      = args.encoder     if args.encoder     is not None else cfg.get('model', {}).get('encoder', 'resnet18')
+    final_cfg.mode         = args.mode        if args.mode        is not None else cfg.get('data', {}).get('mode', 'search')
+    final_cfg.epochs       = args.epochs      if args.epochs      is not None else cfg.get('training', {}).get('epochs', 5)
+    final_cfg.batch_size   = args.batch_size  if args.batch_size  is not None else cfg.get('training', {}).get('batch_size', 32)
+    final_cfg.lr           = args.lr          if args.lr          is not None else cfg.get('training', {}).get('lr', 1e-3)
+    final_cfg.num_workers  = args.num_workers if args.num_workers is not None else cfg.get('training', {}).get('num_workers', 4)
+    final_cfg.output_dir   = args.output_dir  if args.output_dir  is not None else cfg.get('output_dir', 'results')
+    final_cfg.project      = args.project     if args.project     is not None else cfg.get('project', 'C5-ImageCaptioning')
+    final_cfg.scheduler    = cfg.get('training', {}).get('scheduler', 'plateau')
+    final_cfg.grad_clip    = cfg.get('training', {}).get('grad_clip', 5.0)
+    final_cfg.freeze_encoder = cfg.get('model', {}).get('freeze_encoder', False)
+
     return final_cfg
+
 
 def convert_indices_to_string(indices):
     res = ""
@@ -93,36 +87,41 @@ def convert_indices_to_string(indices):
             res += char
     return res
 
-def train_one_epoch(model, optimizer, crit, dataloader, epoch):
+
+def train_one_epoch(model, optimizer, crit, dataloader, epoch, grad_clip=5.0):
     model.train()
     total_loss = 0
+    grad_norms = []
     progress_bar = tqdm(dataloader, desc=f"Training Epoch {epoch}", mininterval=30.0)
-    
+
     for img, caption, _ in progress_bar:
         img, caption = img.to(DEVICE), caption.to(DEVICE)
-        
+
         optimizer.zero_grad()
         pred = model(img, caption)
-        # caption[:, 1:] are the tokens we want to predict (skipping <SOS>)
-        loss = crit(pred, caption[:, 1:])
-        
+        loss = crit(pred, caption[:, 1:])  # predict caption[:, 1:] (skip <SOS>)
+
         loss.backward()
+        # clip_grad_norm_ returns the pre-clip norm — useful for monitoring gradient health
+        raw_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+        grad_norms.append(raw_norm.item())
         optimizer.step()
-        
+
         total_loss += loss.item()
-        
-    return total_loss / len(dataloader)
+
+    avg_grad_norm = sum(grad_norms) / len(grad_norms)
+    max_grad_norm = max(grad_norms)
+    return total_loss / len(dataloader), avg_grad_norm, max_grad_norm
+
 
 def eval_epoch(model, dataloader, crit):
     model.eval()
-    all_preds = []
-    all_refs = []
-    all_refs_old = []
-    total_images = 0
-    total_inference_time = 0.0  # seconds, model forward only
-    batch_latencies = []         # per-batch forward times (seconds)
-    total_val_loss = 0.0
-    val_loss_steps = 0
+    all_preds, all_refs, all_refs_old = [], [], []
+    total_images         = 0
+    total_inference_time = 0.0
+    batch_latencies      = []
+    total_val_loss       = 0.0
+    val_loss_steps       = 0
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -130,28 +129,30 @@ def eval_epoch(model, dataloader, crit):
     print("Evaluating...")
     eval_start = time.perf_counter()
 
-    sample_indices = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450] 
+    # Reverse mapping filename → image_id: safe lookup regardless of batch size
+    filename_to_img_id = {v: k for k, v in dataloader.dataset.images.items()}
+
+    sample_indices  = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450]
     samples_to_print = []
 
     with torch.no_grad():
         for i, (img, caption, img_names) in enumerate(tqdm(dataloader, desc="Eval", mininterval=30.0)):
             img, caption = img.to(DEVICE), caption.to(DEVICE)
 
-            # --- Calculate Validation Loss (Teacher Forcing) ---
-            # We use teacher forcing during eval loss to see how well the model "knows" the sequences
+            # Validation loss via teacher forcing
             val_pred = model(img, caption)
-            v_loss = crit(val_pred, caption[:, 1:])
+            v_loss   = crit(val_pred, caption[:, 1:])
             total_val_loss += v_loss.item()
             val_loss_steps += 1
 
-            # --- time the forward pass only (Auto-regressive) ---
+            # Auto-regressive inference (timed)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            pred = model(img) # Generative pass
+            t0   = time.perf_counter()
+            pred = model(img)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            t1 = time.perf_counter()
+            t1   = time.perf_counter()
 
             batch_latencies.append(t1 - t0)
             total_inference_time += t1 - t0
@@ -159,39 +160,35 @@ def eval_epoch(model, dataloader, crit):
 
             pred_indices = pred.argmax(dim=1)
             for b in range(img.size(0)):
-                pred_str = convert_indices_to_string(pred_indices[b])
-                # Retrieve all valid references for this image from the dataset
-                actual_img_id = dataloader.dataset.valid_image_ids[i * dataloader.batch_size + b]
-                ref_strs = dataloader.dataset.image_captions[actual_img_id]
-                
+                pred_str      = convert_indices_to_string(pred_indices[b])
+                actual_img_id = filename_to_img_id[img_names[b]]
+                ref_strs      = dataloader.dataset.image_captions[actual_img_id]
+
                 all_preds.append(pred_str)
                 all_refs.append(ref_strs)
                 all_refs_old.append([ref_strs[0]])
-                
-                # Collect samples (store all references)
+
                 global_idx = i * dataloader.batch_size + b
                 if global_idx in sample_indices:
                     samples_to_print.append((pred_str, ref_strs, img_names[b]))
 
-    eval_end = time.perf_counter()
+    eval_end          = time.perf_counter()
     total_run_latency = eval_end - eval_start
 
-    # --- compute metrics ---
     try:
         bleu1 = bleu.compute(predictions=all_preds, references=all_refs, max_order=1)
         bleu2 = bleu.compute(predictions=all_preds, references=all_refs, max_order=2)
         res_r = rouge.compute(predictions=all_preds, references=all_refs)
         res_m = meteor.compute(predictions=all_preds, references=all_refs)
-        
+
         bleu1_old = bleu.compute(predictions=all_preds, references=all_refs_old, max_order=1)
         bleu2_old = bleu.compute(predictions=all_preds, references=all_refs_old, max_order=2)
         res_r_old = rouge.compute(predictions=all_preds, references=all_refs_old)
         res_m_old = meteor.compute(predictions=all_preds, references=all_refs_old)
 
-        cider_score = 0.0
-        cider_score_old = 0.0
+        cider_score = cider_score_old = 0.0
         if CIDER_AVAILABLE:
-            cider_score = cider.compute(predictions=all_preds, references=all_refs)['cider'] * 100
+            cider_score     = cider.compute(predictions=all_preds, references=all_refs)['cider'] * 100
             cider_score_old = cider.compute(predictions=all_preds, references=all_refs_old)['cider'] * 100
 
         metrics = {
@@ -207,11 +204,10 @@ def eval_epoch(model, dataloader, crit):
             "CIDEr_old":   cider_score_old,
         }
     except Exception as e:
-        print(f"Failed computing metrics (possibly empty predictions): {e}")
-        metrics = {"BLEU-1": 0, "BLEU-2": 0, "ROUGE-L": 0, "METEOR": 0, "CIDEr": 0,
-                   "BLEU-1_old": 0, "BLEU-2_old": 0, "ROUGE-L_old": 0, "METEOR_old": 0, "CIDEr_old": 0}
+        print(f"Failed computing metrics: {e}")
+        metrics = {k: 0 for k in ["BLEU-1", "BLEU-2", "ROUGE-L", "METEOR", "CIDEr",
+                                   "BLEU-1_old", "BLEU-2_old", "ROUGE-L_old", "METEOR_old", "CIDEr_old"]}
 
-    # --- Print Samples ---
     print("\n--- Evaluation Samples ---")
     for s_pred, s_refs, s_img in samples_to_print:
         print(f"  Img:  {s_img}")
@@ -220,21 +216,20 @@ def eval_epoch(model, dataloader, crit):
         print(f"  Pred:  {s_pred}")
         print("-" * 20)
 
-    # --- compute metrics ---
-    fps = total_images / total_inference_time if total_inference_time > 0 else 0.0
+    fps            = total_images / total_inference_time if total_inference_time > 0 else 0.0
     avg_latency_ms = (total_inference_time / len(batch_latencies) * 1000) if batch_latencies else 0.0
-    max_vram_gb = (torch.cuda.max_memory_allocated() / 1024 ** 3) if torch.cuda.is_available() else 0.0
+    max_vram_gb    = (torch.cuda.max_memory_allocated() / 1024 ** 3) if torch.cuda.is_available() else 0.0
 
-    compute_metrics = {
-        "val_loss":                      total_val_loss / val_loss_steps if val_loss_steps > 0 else 0.0,
-        "compute/total_run_latency_s":   round(total_run_latency, 3),
+    metrics.update({
+        "val_loss":                       total_val_loss / val_loss_steps if val_loss_steps > 0 else 0.0,
+        "compute/total_run_latency_s":    round(total_run_latency, 3),
         "compute/total_inference_time_s": round(total_inference_time, 3),
-        "compute/fps":                   round(fps, 2),
-        "compute/avg_batch_latency_ms":  round(avg_latency_ms, 3),
-        "compute/max_vram_gb":           round(max_vram_gb, 4),
-    }
-    metrics.update(compute_metrics)
+        "compute/fps":                    round(fps, 2),
+        "compute/avg_batch_latency_ms":   round(avg_latency_ms, 3),
+        "compute/max_vram_gb":            round(max_vram_gb, 4),
+    })
     return metrics, samples_to_print
+
 
 def main():
     args = parse_args()
@@ -244,76 +239,79 @@ def main():
         config=vars(args),
         name=f"{args.encoder}_lr{args.lr}_bs{args.batch_size}",
     )
-    cfg = wandb.config  # sweep may override args values
+    cfg = wandb.config  # W&B sweep may override values
 
-    print(f"Config: encoder={cfg.encoder}, mode={cfg.mode}, lr={cfg.lr}, batch_size={cfg.batch_size}, epochs={cfg.epochs}")
+    print(f"Config: encoder={cfg.encoder}, mode={cfg.mode}, lr={cfg.lr}, "
+          f"batch_size={cfg.batch_size}, epochs={cfg.epochs}")
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     run_output_dir = os.path.join(cfg.output_dir, f"{run.name}_{run.id}")
     os.makedirs(run_output_dir, exist_ok=True)
-    ckpt_path = os.path.join(run_output_dir, "best_model.pt")
-
-    # Dir for visual samples
-    samples_dir = os.path.join(run_output_dir, "visual_samples")
-    os.makedirs(samples_dir, exist_ok=True)
+    ckpt_path    = os.path.join(run_output_dir, "best_model.pt")
+    samples_dir  = os.path.join(run_output_dir, "visual_samples")
     history_file = os.path.join(run_output_dir, "captions_history.json")
-    caption_history = {} # epoch -> samples
+    os.makedirs(samples_dir, exist_ok=True)
+    caption_history = {}
 
-    # Save run configuration
     with open(os.path.join(run_output_dir, "config.json"), "w") as f:
         json.dump(dict(cfg), f, indent=4)
 
     print("Loading datasets...")
     if cfg.mode == "search":
-        # In search mode, val data is also from TRAIN_ANN (10% split)
+        # search mode: 90/10 split of the training set (val data kept unseen)
         dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train_search", mode=cfg.mode)
-        dataset_valid = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="val_search", mode=cfg.mode)
+        dataset_valid = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="val_search",   mode=cfg.mode)
     else:
         dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train", mode=cfg.mode)
-        dataset_valid = VizWizDataset(VAL_ANN, VAL_IMG_DIR, split="val", mode=cfg.mode)
+        dataset_valid = VizWizDataset(VAL_ANN,   VAL_IMG_DIR,   split="val",   mode=cfg.mode)
 
     dataloader_train = DataLoader(dataset_train, batch_size=cfg.batch_size, shuffle=True,
                                   num_workers=cfg.num_workers, drop_last=True)
     dataloader_valid = DataLoader(dataset_valid, batch_size=cfg.batch_size, shuffle=False,
                                   num_workers=cfg.num_workers)
 
-    print(f"Initializing model with encoder: {cfg.encoder} ...")
-    model = ImageCaptioningModel(encoder_name=cfg.encoder).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    
+    print(f"Initializing model with encoder={cfg.encoder}, freeze_encoder={cfg.freeze_encoder} ...")
+    model = ImageCaptioningModel(
+        encoder_name=cfg.encoder,
+        freeze_encoder=cfg.freeze_encoder,
+    ).to(DEVICE)
+
+    # Optimise only parameters that require gradients (respects freeze_encoder)
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr
+    )
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    wandb.config.update({"trainable_params": trainable_params}, allow_val_change=True)
+
     scheduler = None
     if cfg.scheduler == "plateau":
         print("Using ReduceLROnPlateau scheduler")
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
-    
-    # ignore_index=2 corresponds to <PAD> token
-    crit = nn.CrossEntropyLoss(ignore_index=2)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=5, verbose=True
+        )
 
-    # METEOR is the primary metric (best correlation with human judgement among available).
-    # CIDEr is also logged. BLEU/ROUGE are secondary.
-    primary_metric_name = "METEOR"
+    crit = nn.CrossEntropyLoss(ignore_index=char2idx['<PAD>'])
+
+    primary_metric_name = "METEOR"  # best correlation with human judgement
     best_primary = -1.0
 
     for epoch in range(1, cfg.epochs + 1):
-        loss = train_one_epoch(model, optimizer, crit, dataloader_train, epoch)
-        print(f"End of Epoch {epoch} - Average Train Loss: {loss:.4f}")
+        loss, avg_grad_norm, max_grad_norm = train_one_epoch(
+            model, optimizer, crit, dataloader_train, epoch, grad_clip=cfg.grad_clip
+        )
+        print(f"End of Epoch {epoch} - Train Loss: {loss:.4f} | "
+              f"Grad Norm (avg/max before clip): {avg_grad_norm:.3f} / {max_grad_norm:.3f}")
 
         metrics, eval_samples = eval_epoch(model, dataloader_valid, crit)
-        
-        # Save samples evolution
+
         epoch_samples = []
         for pred, refs, img_name in eval_samples:
-            epoch_samples.append({
-                "image_name": img_name,
-                "references": refs,
-                "prediction": pred
-            })
-            # On first epoch, copy the images to results for easy access
+            epoch_samples.append({"image_name": img_name, "references": refs, "prediction": pred})
             if epoch == 1:
                 src_img = os.path.join(TRAIN_IMG_DIR if cfg.mode == "search" else VAL_IMG_DIR, img_name)
                 if os.path.exists(src_img):
                     shutil.copy(src_img, os.path.join(samples_dir, img_name))
-        
+
         caption_history[epoch] = epoch_samples
         with open(history_file, "w") as f:
             json.dump(caption_history, f, indent=4)
@@ -332,9 +330,15 @@ def main():
               f"Run latency: {metrics.get('compute/total_run_latency_s', 0):.1f}s | "
               f"Max VRAM: {metrics.get('compute/max_vram_gb', 0):.3f}GB")
 
-        wandb.log({"epoch": epoch, "train_loss": loss, "lr": optimizer.param_groups[0]['lr'], **metrics})
+        wandb.log({
+            "epoch":         epoch,
+            "train_loss":    loss,
+            "lr":            optimizer.param_groups[0]['lr'],
+            "grad_norm/avg": avg_grad_norm,
+            "grad_norm/max": max_grad_norm,
+            **metrics,
+        })
 
-        # Step scheduler based on METEOR (primary metric)
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(metrics.get(primary_metric_name, 0))
@@ -344,14 +348,10 @@ def main():
         if metrics.get(primary_metric_name, 0) > best_primary:
             best_primary = metrics[primary_metric_name]
             torch.save(model.state_dict(), ckpt_path)
-            
-            # Save best metrics
             with open(os.path.join(run_output_dir, "best_metrics.json"), "w") as f:
                 json.dump(metrics, f, indent=4)
-
             print(f"  -> New best {primary_metric_name}: {best_primary:.2f} — checkpoint saved to {ckpt_path}")
             wandb.run.summary[f"best_{primary_metric_name}"] = best_primary
-            # also log compute metrics as run summary on first best
             for k, v in metrics.items():
                 if k.startswith("compute/"):
                     wandb.run.summary[k] = v
