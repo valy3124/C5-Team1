@@ -6,13 +6,15 @@ metric:
   goal: maximize
 parameters:
   encoder:
-    values: ["resnet18", "resnet34", "resnet50", "vgg16", "vgg19"]
+    values: ["resnet18", "resnet34", "resnet50", "vgg16", "vgg19", "efficientnet_b0"]
+  mode:
+    value: "search"
   epochs:
-    value: 5
+    value: 10
   batch_size:
-    value: 32
+    value: 128
   lr:
-    value: 1e-3
+    value: 5e-4
   num_workers:
     value: 4
   output_dir:

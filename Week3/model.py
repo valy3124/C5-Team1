@@ -15,6 +15,7 @@ ENCODER_CONFIGS = {
     'resnet50': ('hf',          'microsoft/resnet-50', 2048),
     'vgg16':    ('torchvision', 'vgg16',               512),
     'vgg19':    ('torchvision', 'vgg19',               512),
+    'efficientnet_b0': ('torchvision', 'efficientnet_b0', 1280),
 }
 
 
@@ -30,9 +31,9 @@ class ImageCaptioningModel(nn.Module):
             self.encoder = ResNetModel.from_pretrained(identifier)
             self._is_hf = True
         else:
-            # Use convolutional features + global average pool → (B, 512, 1, 1)
-            vgg = getattr(tvm, identifier)(weights='DEFAULT')
-            self.encoder = nn.Sequential(vgg.features, nn.AdaptiveAvgPool2d(1))
+            # Use convolutional features + global average pool → (B, enc_dim, 1, 1)
+            net = getattr(tvm, identifier)(weights='DEFAULT')
+            self.encoder = nn.Sequential(net.features, nn.AdaptiveAvgPool2d(1))
             self._is_hf = False
 
         # Project encoder output to GRU hidden dim if needed

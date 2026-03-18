@@ -117,6 +117,7 @@ def eval_epoch(model, dataloader, crit):
     model.eval()
     all_preds = []
     all_refs = []
+    all_refs_old = []
     total_images = 0
     total_inference_time = 0.0  # seconds, model forward only
     batch_latencies = []         # per-batch forward times (seconds)
@@ -165,6 +166,7 @@ def eval_epoch(model, dataloader, crit):
                 
                 all_preds.append(pred_str)
                 all_refs.append(ref_strs)
+                all_refs_old.append([ref_strs[0]])
                 
                 # Collect samples (store all references)
                 global_idx = i * dataloader.batch_size + b
@@ -180,9 +182,17 @@ def eval_epoch(model, dataloader, crit):
         bleu2 = bleu.compute(predictions=all_preds, references=all_refs, max_order=2)
         res_r = rouge.compute(predictions=all_preds, references=all_refs)
         res_m = meteor.compute(predictions=all_preds, references=all_refs)
+        
+        bleu1_old = bleu.compute(predictions=all_preds, references=all_refs_old, max_order=1)
+        bleu2_old = bleu.compute(predictions=all_preds, references=all_refs_old, max_order=2)
+        res_r_old = rouge.compute(predictions=all_preds, references=all_refs_old)
+        res_m_old = meteor.compute(predictions=all_preds, references=all_refs_old)
+
         cider_score = 0.0
+        cider_score_old = 0.0
         if CIDER_AVAILABLE:
             cider_score = cider.compute(predictions=all_preds, references=all_refs)['cider'] * 100
+            cider_score_old = cider.compute(predictions=all_preds, references=all_refs_old)['cider'] * 100
 
         metrics = {
             "BLEU-1":  bleu1['bleu'] * 100,
@@ -190,10 +200,16 @@ def eval_epoch(model, dataloader, crit):
             "ROUGE-L": res_r['rougeL'] * 100,
             "METEOR":  res_m['meteor'] * 100,
             "CIDEr":   cider_score,
+            "BLEU-1_old":  bleu1_old['bleu'] * 100,
+            "BLEU-2_old":  bleu2_old['bleu'] * 100,
+            "ROUGE-L_old": res_r_old['rougeL'] * 100,
+            "METEOR_old":  res_m_old['meteor'] * 100,
+            "CIDEr_old":   cider_score_old,
         }
     except Exception as e:
         print(f"Failed computing metrics (possibly empty predictions): {e}")
-        metrics = {"BLEU-1": 0, "BLEU-2": 0, "ROUGE-L": 0, "METEOR": 0, "CIDEr": 0}
+        metrics = {"BLEU-1": 0, "BLEU-2": 0, "ROUGE-L": 0, "METEOR": 0, "CIDEr": 0,
+                   "BLEU-1_old": 0, "BLEU-2_old": 0, "ROUGE-L_old": 0, "METEOR_old": 0, "CIDEr_old": 0}
 
     # --- Print Samples ---
     print("\n--- Evaluation Samples ---")
@@ -303,9 +319,12 @@ def main():
             json.dump(caption_history, f, indent=4)
 
         print("Validation Metrics:")
-        print(f"  BLEU-1: {metrics.get('BLEU-1', 0):.2f}% | BLEU-2: {metrics.get('BLEU-2', 0):.2f}% | "
+        print(f"  [New] BLEU-1: {metrics.get('BLEU-1', 0):.2f}% | BLEU-2: {metrics.get('BLEU-2', 0):.2f}% | "
               f"ROUGE-L: {metrics.get('ROUGE-L', 0):.2f}% | METEOR: {metrics.get('METEOR', 0):.4f}% | "
               f"CIDEr: {metrics.get('CIDEr', 0):.2f}")
+        print(f"  [Old] BLEU-1: {metrics.get('BLEU-1_old', 0):.2f}% | BLEU-2: {metrics.get('BLEU-2_old', 0):.2f}% | "
+              f"ROUGE-L: {metrics.get('ROUGE-L_old', 0):.2f}% | METEOR: {metrics.get('METEOR_old', 0):.4f}% | "
+              f"CIDEr: {metrics.get('CIDEr_old', 0):.2f}")
         print(f"  Val Loss: {metrics.get('val_loss', 0):.4f}")
         print(f"  FPS: {metrics.get('compute/fps', 0):.1f} | "
               f"Avg batch latency: {metrics.get('compute/avg_batch_latency_ms', 0):.1f}ms | "
