@@ -3,8 +3,8 @@
 #SBATCH --mem 24G
 #SBATCH -p mlow
 #SBATCH --gres gpu:1
-#SBATCH -o logs-decoders/sweep_%u_%j.out
-#SBATCH -e logs-decoders/sweep_%u_%j.err
+#SBATCH -o logs-text-level/sweep_%u_%j.out
+#SBATCH -e logs-text-level/sweep_%u_%j.err
 
 SWEEP_ID=$1
 PROJECT=$2

@@ -1,0 +1,40 @@
+program: train.py
+project: "C5-ImageCaptioning-sweep-text-level"
+method: grid
+metric:
+  name: best_METEOR
+  goal: maximize
+
+parameters:
+  encoder:
+    value: "clip-vit-b32"
+  decoder_type:
+    value: "xlstm"
+  decoder_dim:
+    value: 512
+  decoder_layers:
+    value: 2
+  embed_dim:
+    value: 512
+  text_level:
+    values: ["char", "subword", "word"]
+  lr:
+    value: 0.0005
+  mode:
+    value: "search"
+  epochs:
+    value: 10
+  batch_size:
+    value: 128
+  num_workers:
+    value: 4
+  output_dir:
+    value: "results/text_level_sweep"
+  freeze_encoder:
+    value: true
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}

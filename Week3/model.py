@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from transformers import ResNetModel, CLIPVisionModel
+from transformers import ResNetModel, CLIPVisionModel, CLIPTextModel
 import torchvision.models as tvm
 from dataset import NUM_CHAR, char2idx, TEXT_MAX_LEN
 
@@ -45,19 +45,28 @@ class ImageCaptioningModel(nn.Module):
       - Encoder: pre-trained CNN (ResNet / VGG / EfficientNet) → pooled feature vector (B, enc_dim)
       - encoder_proj: linear projection to GRU_DIM if enc_dim != GRU_DIM, else Identity
       - Decoder: single-layer GRU initialised with the image feature as h0
-      - embed: character embedding (NUM_CHAR, GRU_DIM)
-      - proj: linear output head (GRU_DIM → NUM_CHAR)
+      - embed: token embedding (vocab_size, GRU_DIM)
+      - proj: linear output head (GRU_DIM → vocab_size)
 
     Training uses teacher forcing; inference is greedy auto-regressive with early EOS stopping.
     """
 
     def __init__(self, encoder_name='resnet18', freeze_encoder=False, 
-                 decoder_type='gru', decoder_dim=512, decoder_layers=1, embed_dim=512):
+                 decoder_type='gru', decoder_dim=512, decoder_layers=1, embed_dim=512,
+                 vocab_size=NUM_CHAR, sos_idx=char2idx['<SOS>'], eos_idx=char2idx['<EOS>'], 
+                 pad_idx=char2idx['<PAD>'], max_len=TEXT_MAX_LEN,
+                 clip_embeddings=False, clip_model_id='openai/clip-vit-base-patch32',
+                 freeze_embeddings=False):
         super().__init__()
         self.decoder_type = decoder_type
         self.decoder_dim = decoder_dim
         self.decoder_layers = decoder_layers
         self.embed_dim = embed_dim
+        self.vocab_size = vocab_size
+        self.sos_idx = sos_idx
+        self.eos_idx = eos_idx
+        self.pad_idx = pad_idx
+        self.max_len = max_len
 
         if encoder_name not in ENCODER_CONFIGS:
             raise ValueError(f"Unknown encoder '{encoder_name}'. Choose from: {list(ENCODER_CONFIGS)}")
@@ -94,9 +103,6 @@ class ImageCaptioningModel(nn.Module):
                 raise ImportError("xLSTM implementation not found. Please install the 'xlstm' package.")
             
             # xLSTM (specifically mLSTM) configuration:
-            # - We use a stack of mLSTM blocks (controlled by decoder_layers).
-            # - embedding_dim is set to decoder_dim.
-            # - context_length is set to TEXT_MAX_LEN + 1 (to account for the image prefix).
             xlstm_cfg = xLSTMBlockStackConfig(
                 mlstm_block=mLSTMBlockConfig(
                     mlstm=mLSTMLayerConfig(
@@ -107,7 +113,7 @@ class ImageCaptioningModel(nn.Module):
                 num_blocks=decoder_layers,
                 embedding_dim=decoder_dim,
                 slstm_at=[], # pure mLSTM stack
-                context_length=TEXT_MAX_LEN + 1,
+                context_length=self.max_len + 1,
                 add_post_blocks_norm=True
             )
             self.decoder = xLSTMBlockStack(xlstm_cfg)
@@ -117,8 +123,29 @@ class ImageCaptioningModel(nn.Module):
         else:
             raise ValueError(f"Unknown decoder_type '{decoder_type}'. Choose from: 'gru', 'lstm', 'xlstm'")
 
-        self.proj  = nn.Linear(decoder_dim, NUM_CHAR)
-        self.embed = nn.Embedding(NUM_CHAR, embed_dim)
+        self.proj  = nn.Linear(decoder_dim, vocab_size)
+        
+        if clip_embeddings:
+            print(f"[Model] Initializing embeddings from {clip_model_id}...")
+            clip_text = CLIPTextModel.from_pretrained(clip_model_id, use_safetensors=True)
+            pretrained_weights = clip_text.get_input_embeddings().weight.data
+            
+            # Check if vocab_size matches
+            if pretrained_weights.shape[0] != vocab_size:
+                print(f"[Warning] CLIP vocab size ({pretrained_weights.shape[0]}) != tokenizer vocab size ({vocab_size}). Truncating/Padding.")
+                # Basic handling: if tokenizer vocab is smaller, take first N tokens. 
+                # CLIP tokenizer usually matches 49408 exactly.
+                new_weights = torch.zeros((vocab_size, pretrained_weights.shape[1]))
+                common = min(vocab_size, pretrained_weights.shape[0])
+                new_weights[:common] = pretrained_weights[:common]
+                pretrained_weights = new_weights
+
+            self.embed = nn.Embedding.from_pretrained(pretrained_weights, freeze=freeze_embeddings)
+            # Override embed_dim to match pretrained weights
+            self.embed_dim = pretrained_weights.shape[1]
+            print(f"[Model] Embed dim set to {self.embed_dim} from CLIP.")
+        else:
+            self.embed = nn.Embedding(vocab_size, embed_dim)
 
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total     = sum(p.numel() for p in self.parameters())
@@ -136,51 +163,40 @@ class ImageCaptioningModel(nn.Module):
         feat = self._extract_features(img)
         feat = self.encoder_proj(feat)
         # Initialize hidden state with image features
-        # Hidden state shape for GRU/LSTM: (num_layers, batch, hidden_dim)
-        # We repeat the pooled image feature for each layer
         hidden = feat.unsqueeze(0).repeat(self.decoder_layers, 1, 1)
         
         if self.decoder_type == 'lstm':
-            # LSTM also needs a cell state
             cell = torch.zeros_like(hidden)
             hidden = (hidden, cell)
         elif self.decoder_type == 'xlstm':
-            # For xLSTM, we trigger the first "step" with the image feature as a virtual token
-            # We initialize the state by passing the image feature through 'step'
             img_token = feat.unsqueeze(1) # (B, 1, decoder_dim)
             _, hidden = self.decoder.step(img_token, state=None)
-            # After this, 'hidden' contains the compiled state from the image
         else:
             hidden = None
+
         if target_caption is not None:
             if self.decoder_type == 'xlstm':
-                # For xLSTM, we prepend the image feature as the first "token" in the sequence
-                # feat is (B, decoder_dim)
                 img_token = feat.unsqueeze(1) # (B, 1, decoder_dim)
                 embedded_seq = self.embed(target_caption[:, :-1]) # (B, T-1, embed_dim)
                 embedded_seq = self.decoder_proj_inp(embedded_seq) # (B, T-1, decoder_dim)
                 
                 full_seq = torch.cat([img_token, embedded_seq], dim=1) # (B, T, decoder_dim)
                 output = self.decoder(full_seq) # (B, T, decoder_dim)
-                # Take all outputs corresponding to text tokens (index 1 onwards)
                 output = output[:, 1:] # (B, T-1, decoder_dim)
                 res = self.proj(output)
                 return res.permute(0, 2, 1)
             else:
-                # Teacher-forcing training: feed all ground-truth tokens in one decoder call
                 inp_seq = self.embed(target_caption[:, :-1])  # (B, T-1, embed_dim)
-                # nn.GRU/LSTM with batch_first=True expects (B, T, embed_dim)
                 output, _ = self.decoder(inp_seq, hidden)     # (B, T-1, decoder_dim)
-                res = self.proj(output)                       # (B, T-1, NUM_CHAR)
-                return res.permute(0, 2, 1)                   # (B, NUM_CHAR, T-1)
+                res = self.proj(output)                       # (B, T-1, vocab_size)
+                return res.permute(0, 2, 1)                   # (B, vocab_size, T-1)
         else:
-            # Greedy auto-regressive inference with early EOS stopping
-            curr_token = torch.full((batch_size,), char2idx['<SOS>'], device=device, dtype=torch.long)
+            curr_token = torch.full((batch_size,), self.sos_idx, device=device, dtype=torch.long)
             all_preds  = []
-            eos_idx    = char2idx['<EOS>']
+            eos_idx    = self.eos_idx
             finished   = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
-            for _ in range(TEXT_MAX_LEN - 1):
+            for _ in range(self.max_len - 1):
                 inp = self.embed(curr_token).unsqueeze(1)  # (B, 1, embed_dim)
                 
                 if self.decoder_type == 'xlstm':
@@ -189,14 +205,15 @@ class ImageCaptioningModel(nn.Module):
                 else:
                     out, hidden = self.decoder(inp, hidden) # (B, 1, decoder_dim)
 
-                logits = self.proj(out.squeeze(1))            # (B, NUM_CHAR)
+                logits = self.proj(out.squeeze(1))            # (B, vocab_size)
                 all_preds.append(logits.unsqueeze(2))
                 curr_token = logits.argmax(dim=1)
                 finished = finished | (curr_token == eos_idx)
                 if finished.all():
                     break
 
-            return torch.cat(all_preds, dim=2)  # (B, NUM_CHAR, ≤TEXT_MAX_LEN-1)
+            return torch.cat(all_preds, dim=2)  # (B, vocab_size, ≤max_len-1)
+
 
 
 if __name__ == "__main__":
