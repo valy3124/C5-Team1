@@ -11,7 +11,7 @@ training:
   grad_clip: 5.0  # Max gradient norm; set to 0 to disable
 
 data:
-  mode: "search"
+  mode: "full"
 
 project: "C5-ImageCaptioning"
-output_dir: "results/baseline"
+output_dir: "results/baseline/full"

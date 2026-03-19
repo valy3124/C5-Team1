@@ -5,7 +5,7 @@
 
 CONFIG=${1:-configs/sweep_encoder.yaml}
 
-cd /ghome/group01/C5/vali/C5-Team1/Week3
+cd /ghome/group01/C5/benet/C5-Team1/Week3
 
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5

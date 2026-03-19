@@ -15,24 +15,36 @@ char2idx = {v: k for k, v in enumerate(chars)}
 TEXT_MAX_LEN = 201
 
 class VizWizDataset(Dataset):
-    def __init__(self, annotation_file, img_dir, split="train", mode="search"):
+    # Standard normalization presets
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD  = (0.229, 0.224, 0.225)
+    CLIP_MEAN     = (0.48145466, 0.4578275, 0.40821073)
+    CLIP_STD      = (0.26862954, 0.26130258, 0.27577711)
+
+    def __init__(self, annotation_file, img_dir, split="train", mode="search",
+                 img_mean=None, img_std=None):
         """
         Args:
             annotation_file (str): Path to the JSON annotation file.
             img_dir (str): Directory with all the images.
-            split (str): 'train', 'val', or 'test'. Test set has no publicly available captions.
-            mode (str): 'search' to use a subset of the dataset, 'full' to use the whole dataset.
+            split (str): 'train', 'val', or 'test'.
+            mode (str): 'search' (90/10 subset) or 'full' (entire split).
+            img_mean (tuple): Normalization mean. Defaults to ImageNet values.
+            img_std  (tuple): Normalization std.  Defaults to ImageNet values.
         """
         self.img_dir = img_dir
-        self.split = split
-        self.mode = mode
+        self.split   = split
+        self.mode    = mode
         self.max_len = TEXT_MAX_LEN
-        
+
+        mean = img_mean if img_mean is not None else self.IMAGENET_MEAN
+        std  = img_std  if img_std  is not None else self.IMAGENET_STD
+
         self.img_proc = torch.nn.Sequential(
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
             v2.Resize((224, 224), antialias=True),
-            v2.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            v2.Normalize(mean, std),
         )
 
         # Load annotations

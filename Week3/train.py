@@ -50,8 +50,16 @@ def parse_args():
     parser.add_argument('--batch_size',  type=int)
     parser.add_argument('--lr',          type=float)
     parser.add_argument('--num_workers', type=int)
-    parser.add_argument('--output_dir',  type=str)
-    parser.add_argument('--project',     type=str, help='W&B project name')
+    parser.add_argument('--output_dir',     type=str)
+    parser.add_argument('--project',         type=str,   help='W&B project name')
+    parser.add_argument('--freeze_encoder',  type=lambda x: x.lower() != 'false',
+                        default=None,        help='Freeze encoder weights (true/false)')
+    parser.add_argument('--grad_clip',       type=float, default=None,
+                        help='Max gradient norm for clipping (0 = disabled)')
+    parser.add_argument('--decoder_type',   type=str, choices=['gru', 'lstm', 'xlstm'])
+    parser.add_argument('--decoder_dim',    type=int)
+    parser.add_argument('--decoder_layers', type=int)
+    parser.add_argument('--embed_dim',      type=int)
 
     args = parser.parse_args()
 
@@ -71,8 +79,13 @@ def parse_args():
     final_cfg.output_dir   = args.output_dir  if args.output_dir  is not None else cfg.get('output_dir', 'results')
     final_cfg.project      = args.project     if args.project     is not None else cfg.get('project', 'C5-ImageCaptioning')
     final_cfg.scheduler    = cfg.get('training', {}).get('scheduler', 'plateau')
-    final_cfg.grad_clip    = cfg.get('training', {}).get('grad_clip', 5.0)
-    final_cfg.freeze_encoder = cfg.get('model', {}).get('freeze_encoder', False)
+    final_cfg.grad_clip    = args.grad_clip    if args.grad_clip    is not None else cfg.get('training', {}).get('grad_clip', 5.0)
+    final_cfg.freeze_encoder = args.freeze_encoder if args.freeze_encoder is not None else cfg.get('model', {}).get('freeze_encoder', False)
+    
+    final_cfg.decoder_type   = args.decoder_type   if args.decoder_type   is not None else cfg.get('model', {}).get('decoder_type', 'gru')
+    final_cfg.decoder_dim    = args.decoder_dim    if args.decoder_dim    is not None else cfg.get('model', {}).get('decoder_dim', 512)
+    final_cfg.decoder_layers = args.decoder_layers if args.decoder_layers is not None else cfg.get('model', {}).get('decoder_layers', 1)
+    final_cfg.embed_dim      = args.embed_dim      if args.embed_dim      is not None else cfg.get('model', {}).get('embed_dim', 512)
 
     return final_cfg
 
@@ -237,7 +250,7 @@ def main():
     run = wandb.init(
         project=args.project,
         config=vars(args),
-        name=f"{args.encoder}_lr{args.lr}_bs{args.batch_size}",
+        name=f"{args.encoder}_{args.decoder_type}_d{args.decoder_dim}_l{args.decoder_layers}_lr{args.lr}_bs{args.batch_size}",
     )
     cfg = wandb.config  # W&B sweep may override values
 
@@ -257,13 +270,26 @@ def main():
         json.dump(dict(cfg), f, indent=4)
 
     print("Loading datasets...")
+    # Auto-select correct image normalization for the chosen encoder
+    encoder_source = ENCODER_CONFIGS.get(cfg.encoder, ('hf',))[0]
+    if encoder_source == 'clip':
+        img_mean = VizWizDataset.CLIP_MEAN
+        img_std  = VizWizDataset.CLIP_STD
+    else:
+        img_mean = VizWizDataset.IMAGENET_MEAN
+        img_std  = VizWizDataset.IMAGENET_STD
+
     if cfg.mode == "search":
         # search mode: 90/10 split of the training set (val data kept unseen)
-        dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train_search", mode=cfg.mode)
-        dataset_valid = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="val_search",   mode=cfg.mode)
+        dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train_search", mode=cfg.mode,
+                                      img_mean=img_mean, img_std=img_std)
+        dataset_valid = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="val_search",   mode=cfg.mode,
+                                      img_mean=img_mean, img_std=img_std)
     else:
-        dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train", mode=cfg.mode)
-        dataset_valid = VizWizDataset(VAL_ANN,   VAL_IMG_DIR,   split="val",   mode=cfg.mode)
+        dataset_train = VizWizDataset(TRAIN_ANN, TRAIN_IMG_DIR, split="train", mode=cfg.mode,
+                                      img_mean=img_mean, img_std=img_std)
+        dataset_valid = VizWizDataset(VAL_ANN,   VAL_IMG_DIR,   split="val",   mode=cfg.mode,
+                                      img_mean=img_mean, img_std=img_std)
 
     dataloader_train = DataLoader(dataset_train, batch_size=cfg.batch_size, shuffle=True,
                                   num_workers=cfg.num_workers, drop_last=True)
@@ -274,6 +300,10 @@ def main():
     model = ImageCaptioningModel(
         encoder_name=cfg.encoder,
         freeze_encoder=cfg.freeze_encoder,
+        decoder_type=cfg.decoder_type,
+        decoder_dim=cfg.decoder_dim,
+        decoder_layers=cfg.decoder_layers,
+        embed_dim=cfg.embed_dim
     ).to(DEVICE)
 
     # Optimise only parameters that require gradients (respects freeze_encoder)
@@ -336,6 +366,7 @@ def main():
             "lr":            optimizer.param_groups[0]['lr'],
             "grad_norm/avg": avg_grad_norm,
             "grad_norm/max": max_grad_norm,
+            "best_METEOR":   best_primary,  # running max — easy to compare across sweep runs
             **metrics,
         })
 
