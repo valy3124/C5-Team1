@@ -1,0 +1,30 @@
+data:
+  mode: full
+  root: /ghome/group01/mcv/datasets/C5/KITTI-MOTS/
+  seed: 42
+  split_ratio: 0.8
+experiment_name: yolo_sweep
+model:
+  name: yolo
+  weights: yolov10b.pt
+output_dir: results
+project: kitti-mots-yolo-sweep
+training:
+  aug_strategy: base
+  batch_size: 16
+  conf: 0
+  epochs: 25
+  freeze: 0
+  imgsz: 640
+  log_images_every: 25
+  lr: 0.001
+  nms_iou_threshold: 0.5
+  stages:
+  - epochs: 5
+    freeze: 22
+    lr: 5.4885135064454e-05
+    name: head_only
+  - epochs: 5
+    freeze: 10
+    lr: 1.684189913387262e-05
+    name: neck_head

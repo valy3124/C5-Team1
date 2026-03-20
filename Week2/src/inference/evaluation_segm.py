@@ -61,9 +61,6 @@ class CocoSegmentationMetrics:
                 
                 # Use RLE from annotation if exists, otherwise compute it
                 rle = ann.mask_rle
-                    
-                area = maskUtils.area(rle)
-
                 annotations.append({
                     "id": ann_id,
                     "image_id": image_id,
@@ -106,12 +103,49 @@ class CocoSegmentationMetrics:
             
             cat_stats = coco_eval_cat.stats
             cat_metrics = {
-                f"{cat_name}/AP_segm": cat_stats[0], f"{cat_name}/AP_50_segm": cat_stats[1], f"{cat_name}/AP_75_segm": cat_stats[2],
+                f"{cat_name}/AP_segm":    cat_stats[0],
+                f"{cat_name}/AP_50_segm": cat_stats[1],
+                f"{cat_name}/AP_75_segm": cat_stats[2],
             }
+
+            for t_idx, iou_t in enumerate(iou_thresholds):
+                # Mean precision across all recall points at this IoU threshold
+                prec_t  = coco_eval_cat.eval["precision"][t_idx, :, 0, 0, 2]
+                valid_p = prec_t[prec_t > -1]
+                p_t     = float(np.mean(valid_p)) if len(valid_p) > 0 else 0.0
+
+                # Recall at this IoU threshold (area=all, maxDets=100)
+                rec_raw = coco_eval_cat.eval["recall"][t_idx, 0, 0, 2]
+                rec_t   = float(rec_raw) if np.ndim(rec_raw) == 0 else float(np.mean(rec_raw))
+
+                f1_t   = 2 * p_t * rec_t / (p_t + rec_t + 1e-6)
+                suffix = str(round(iou_t * 100))
+                cat_metrics[f"{cat_name}/F1_score_{suffix}_segm"] = f1_t
+                cat_metrics[f"{cat_name}/Recall_{suffix}_segm"]   = rec_t
+
+                all_class_f1s[iou_t].append(f1_t)
+                all_class_recalls[iou_t].append(rec_t)
+
             metrics.update(cat_metrics)
             
         # Attach the global coco_eval for optional error analysis
         self._last_coco_eval = coco_eval
+
+        # Overall (macro-averaged across categories) F1 and Recall
+        for iou_t in iou_thresholds:
+            suffix = str(round(iou_t * 100))
+            metrics[f"overall/F1_score_{suffix}_segm"] = (
+                float(np.mean(all_class_f1s[iou_t])) if all_class_f1s[iou_t] else 0.0
+            )
+            metrics[f"overall/Recall_{suffix}_segm"] = (
+                float(np.mean(all_class_recalls[iou_t])) if all_class_recalls[iou_t] else 0.0
+            )
+
+        # Mean F1 across all thresholds (analogous to mAP)
+        metrics["overall/mF1_segm"] = float(np.mean(
+            [metrics[f"overall/F1_score_{round(t * 100)}_segm"] for t in iou_thresholds]
+        ))
+
         return metrics
 
     def compute_error_analysis(self, coco_dt: COCO) -> Dict[str, float]:

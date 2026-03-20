@@ -1,0 +1,7 @@
+names:
+- Car
+- Pedestrian
+nc: 2
+path: /export/home/group01/C5/xavi/C5-Team1/Week1/results/yolo/yolo_sweep_7q7hwud0/yolo_dataset
+train: images/train
+val: images/val
