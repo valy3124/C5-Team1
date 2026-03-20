@@ -1,0 +1,37 @@
+program: train.py
+project: "C5-ImageCaptioning-sweep-encoder"
+method: grid
+metric:
+  name: best_METEOR
+  goal: maximize
+
+parameters:
+  encoder:
+    values:
+      - clip-vit-b32     # Vision Transformer, language-aligned features (768-dim)
+      - resnet34         # CNN, same dim as resnet18 but deeper
+      - vgg16            # CNN, 512-dim
+      - efficientnet_b0  # CNN, 1280-dim → projected to 512
+      - resnet50         # CNN, 2048-dim → projected to 512
+      - vgg19            # CNN, 512-dim
+      - clip-vit-l14     # very large model, likely too slow per epoch
+  mode:
+    value: "search"
+  epochs:
+    value: 10
+  batch_size:
+    value: 128
+  lr:
+    value: 5e-4
+  num_workers:
+    value: 4
+  output_dir:
+    value: "results/encoder_sweep"
+  freeze_encoder:
+    value: true
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}

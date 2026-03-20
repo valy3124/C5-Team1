@@ -34,7 +34,8 @@ from Week2.src.finetune.utils import (
     setup_experiment, build_scheduler, get_common_parser
 )
 from Week2.src.inference.evaluation_segm import CocoSegmentationMetrics
-from typing import Any
+from Week2.src.inference.evaluation_semantic import SemanticEvaluator, CLASS_NAMES
+from typing import Any, Dict, List
 from PIL import Image
 
 # -----------------------------------------------------------------------------
@@ -203,7 +204,7 @@ def setup_data(exp: Exp) -> Data:
 
     print(f"Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
 
-    return Data(classes, train_loader, val_loader, None, val_coco_metrics, None)
+    return Data(classes, train_loader, val_loader, None, val_coco_metrics, train_ds.LABELS_MAPPING)
 
 def setup_model(exp: Exp, data: Data) -> Run:
     cfg = exp.cfg
@@ -257,7 +258,21 @@ def setup_model(exp: Exp, data: Data) -> Run:
         dino_processor=dino_processor
     )
 
-def prepare_batch_for_sam(batch, processor, device, prompt_type="bbox", is_train=True, dino_model=None, dino_processor=None, text_prompt="pedestrian. car."):
+def _collapse_masks_to_class_union(masks: List[np.ndarray], class_ids: List[int]) -> List[np.ndarray]:
+    """Replace instance masks with class-union masks so same-class objects share one pixel target."""
+    if not masks:
+        return masks
+
+    class_union: Dict[int, np.ndarray] = {}
+    for m, cid in zip(masks, class_ids):
+        if cid not in class_union:
+            class_union[cid] = np.zeros_like(m, dtype=bool)
+        class_union[cid] |= m.astype(bool)
+
+    return [class_union[cid].astype(np.uint8) for cid in class_ids]
+
+
+def prepare_batch_for_sam(batch, processor, device, target_mode="instance", prompt_type="bbox", is_train=True, dino_model=None, dino_processor=None, text_prompt="pedestrian. car."):
     """Process a raw batch of KITTIMOTS tuples into SAM inputs."""
     images = []
     batched_input_boxes = []
@@ -292,6 +307,7 @@ def prepare_batch_for_sam(batch, processor, device, prompt_type="bbox", is_train
         points = []
         labels = []
         masks = []
+        class_ids = []
         for ann in anns:
             boxes.append(ann.bbox_xyxy)
             x1, y1, x2, y2 = ann.bbox_xyxy
@@ -300,6 +316,10 @@ def prepare_batch_for_sam(batch, processor, device, prompt_type="bbox", is_train
             points.append([[center_x, center_y]])
             labels.append([1])
             masks.append(rletools.decode(ann.mask_rle).astype(np.uint8))
+            class_ids.append(ann.class_id)
+
+        if target_mode == "semantic":
+            masks = _collapse_masks_to_class_union(masks, class_ids)
             
         if prompt_type == "text" and batch_dino_results[batch_idx] is not None:
             dino_results = batch_dino_results[batch_idx]
@@ -438,7 +458,16 @@ def postprocess_preds_and_flatten(outputs, raw_masks, num_boxes, original_sizes,
 
     return pred_1d, gt_1d, pred_list, real_ious_1d, pred_ious_1d
 
-def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None, override_prompt_type: str = None) -> Eval:
+def evaluate(
+    exp: Exp,
+    run: Run,
+    loader: DataLoader,
+    coco_metrics: Any = None,
+    label_map: Dict[int, int] = None,
+    target_mode: str = "instance",
+    override_prompt_type: str = None
+) -> Eval:
+    """Evaluates SAM model computing average Dice Loss & BCE and COCO SEG metrics"""
     model = run.model
     device = exp.device
     model.eval()
@@ -448,6 +477,7 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None, o
     total_dice = 0.0
     seg_loss_fn = DiceBCELoss()
     coco_dt_list = []
+    sem_eval = SemanticEvaluator()
     
     prompt_type = override_prompt_type or exp.cfg["training"].get("prompt_type", "bbox")
     text_prompt = exp.cfg["training"].get("text_prompt", "pedestrian. car.")
@@ -455,7 +485,7 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None, o
     with torch.no_grad():
         for batch in loader:
             sam_kwargs, raw_masks, num_boxes, valid_metas_list, valid_targets_list, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
-                batch, run.processor, device, prompt_type, is_train=False, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
+                batch, run.processor, device, target_mode=target_mode, prompt_type=prompt_type, is_train=False, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
             )
             if sam_kwargs is None:
                 continue
@@ -480,6 +510,40 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None, o
             total_loss += loss.item()
             total_bce += loss_bce.item()
             total_dice += loss_dice.item()
+
+            if label_map is not None:
+                iou_scores_out = outputs.iou_scores.view(len(num_boxes), -1).cpu()
+                for i, (n, tgt) in enumerate(zip(num_boxes, valid_targets_list)):
+                    if n == 0 or pred_list[i] is None:
+                        continue
+
+                    safe_n = min(n, len(tgt))
+                    if safe_n == 0:
+                        continue
+
+                    pred_logits_i = pred_list[i][:safe_n].cpu()  # (n, H, W)
+                    pred_scores_i = iou_scores_out[i, :safe_n].numpy()
+                    pred_binary_i = (torch.sigmoid(pred_logits_i) > 0.5).numpy().astype(np.uint8)
+
+                    h_i, w_i = pred_binary_i.shape[-2:]
+                    pred_sem = np.zeros((h_i, w_i), dtype=np.int32)
+                    gt_sem = np.zeros((h_i, w_i), dtype=np.int32)
+
+                    # Build GT semantic map from instance masks
+                    for ann in tgt[:safe_n]:
+                        if ann.class_id not in label_map:
+                            continue
+                        gt_mask = rletools.decode(ann.mask_rle).astype(bool)
+                        gt_sem[gt_mask] = label_map[ann.class_id]
+
+                    # Merge predicted instance masks into semantic map
+                    for j in np.argsort(pred_scores_i):
+                        ann = tgt[j]
+                        if ann.class_id not in label_map:
+                            continue
+                        pred_sem[pred_binary_i[j].astype(bool)] = label_map[ann.class_id]
+
+                    sem_eval.update(pred_sem, gt_sem)
 
             if coco_metrics is not None:
                 iou_scores_out = outputs.iou_scores.view(len(num_boxes), -1).cpu()
@@ -529,12 +593,22 @@ def evaluate(exp: Exp, run: Run, loader: DataLoader, coco_metrics: Any = None, o
         metrics["dice"] = metrics.get("overall/AP_segm", 0.0)
     else:
         metrics["dice"] = avg_loss
+
+    sem_metrics = sem_eval.compute()
+    metrics["semantic/mIoU"] = sem_metrics.get("overall/mIoU", float("nan"))
+    for cid, cname in CLASS_NAMES.items():
+        if cid == 0:
+            continue
+        key = f"{cname}/IoU"
+        if key in sem_metrics:
+            metrics[f"semantic/{cname}_IoU"] = sem_metrics[key]
     
     return Eval(predictions=coco_dt_list, metrics=metrics, inference_fps=0, inference_latency_ms=0)
 
 def train(exp: Exp, data: Data, run: Run) -> Run:
     num_epochs = exp.cfg["training"]["epochs"]
     device = exp.device
+    target_mode = exp.cfg["training"].get("target_mode", "instance")
     
     scaler = torch.amp.GradScaler('cuda' if device.type == 'cuda' else 'cpu')
     seg_loss_fn = DiceBCELoss()
@@ -557,7 +631,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
                 current_prompt_type = np.random.choice(["bbox", "point", "text"])
                 
             sam_kwargs, raw_masks, num_boxes, _, _, original_sizes, reshaped_input_sizes = prepare_batch_for_sam(
-                batch, run.processor, device, current_prompt_type, is_train=True, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
+                batch, run.processor, device, target_mode=target_mode, prompt_type=current_prompt_type, is_train=True, dino_model=run.dino_model, dino_processor=run.dino_processor, text_prompt=text_prompt
             )
             
             if sam_kwargs is None:
@@ -595,7 +669,6 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         train_dice = train_dice_sum / max(1, len(data.train_loader))
         
         print(f"Evaluating epoch {epoch + 1}/{num_epochs}")
-        
         prompt_types_to_eval = ["bbox", "point", "text"] if prompt_type == "mix" else [prompt_type]
         aggregated_metrics = {}
         all_eval_results = []
@@ -603,7 +676,15 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         for p_type in prompt_types_to_eval:
             if len(prompt_types_to_eval) > 1:
                 print(f"  -> Evaluating with prompt: {p_type}")
-            res = evaluate(exp, run, data.val_loader, data.val_coco_metrics, override_prompt_type=p_type)
+            res = evaluate(
+                exp, 
+                run, 
+                data.val_loader, 
+                data.val_coco_metrics, 
+                label_map=data.label_mapping,
+                target_mode=target_mode,
+                override_prompt_type=p_type
+            )
             all_eval_results.append((p_type, res))
             
             for k, v in res.metrics.items():
@@ -614,31 +695,40 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
 
         if len(prompt_types_to_eval) > 1:
             val_segm_ap = sum(r.metrics.get("overall/AP_segm", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
+            val_sem_miou = sum(r.metrics.get("semantic/mIoU", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
             val_loss = sum(r.metrics.get("loss", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
             val_bce = sum(r.metrics.get("loss_bce", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
             val_dice = sum(r.metrics.get("loss_dice", 0.0) for p, r in all_eval_results) / len(prompt_types_to_eval)
             
             aggregated_metrics["overall/AP_segm"] = val_segm_ap
+            aggregated_metrics["semantic/mIoU"] = val_sem_miou
             aggregated_metrics["loss"] = val_loss
             aggregated_metrics["loss_bce"] = val_bce
             aggregated_metrics["loss_dice"] = val_dice
         else:
             val_segm_ap = aggregated_metrics.get("overall/AP_segm", 0.0)
+            val_sem_miou = aggregated_metrics.get("semantic/mIoU", 0.0)
             val_loss = aggregated_metrics.get("loss", 0.0)
             val_bce = aggregated_metrics.get("loss_bce", 0.0)
             val_dice = aggregated_metrics.get("loss_dice", 0.0)
         
         run.history["train_loss"].append(train_loss)
         
-        if val_segm_ap > run.best_map:
-            run.best_map, run.best_epoch = val_segm_ap, epoch
+        best_score = val_sem_miou if target_mode == "semantic" else val_segm_ap
+        if best_score > run.best_map:
+            run.best_map, run.best_epoch = best_score, epoch
             torch.save(run.model.state_dict(), exp.best_model_path)
             
             with open(os.path.join(exp.output_dir, "best_metrics.json"), "w") as fh:
                 json.dump(aggregated_metrics, fh, indent=4)
-            print(f"  >>> New best: COCO AP_segm {run.best_map:.4f} at epoch {epoch + 1}")
+            best_name = "semantic mIoU" if target_mode == "semantic" else "COCO AP_segm"
+            print(f"  >>> New best: {best_name} {run.best_map:.4f} at epoch {epoch + 1}")
             
-        print(f"Epoch {epoch + 1}/{num_epochs} | train_loss: {train_loss:.4f} val_loss: {val_loss:.4f} val_COCO_AP_segm: {val_segm_ap:.4f}")
+        print(
+            f"Epoch {epoch + 1}/{num_epochs} | train_loss: {train_loss:.4f} "
+            f"val_loss: {val_loss:.4f} val_COCO_AP_segm: {val_segm_ap:.4f} "
+            f"val_sem_mIoU: {val_sem_miou:.4f}"
+        )
 
         wandb_log = {
             "epoch": epoch + 1, 
@@ -649,6 +739,7 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
             "val_bce": val_bce,
             "val_dice": val_dice,
             "map_segm": val_segm_ap,
+            "val_sem_mIoU": val_sem_miou,
             "best_map_segm": run.best_map, 
             "best_epoch": run.best_epoch
         }
@@ -667,12 +758,15 @@ def train(exp: Exp, data: Data, run: Run) -> Run:
         if run.scheduler is not None:
             run.scheduler.step()
             
-    print(f"Training complete. Best COCO AP_segm: {run.best_map:.4f} at epoch {run.best_epoch + 1}.")
+    target_mode = exp.cfg["training"].get("target_mode", "instance")
+    best_name = "semantic mIoU" if target_mode == "semantic" else "COCO AP_segm"
+    print(f"Training complete. Best {best_name}: {run.best_map:.4f} at epoch {run.best_epoch + 1}.")
     return run
 
 def main(args):
     print("Setting up experiment...")
     exp  = setup_experiment(args.config, args)
+    exp.cfg.setdefault("training", {})["target_mode"] = args.target_mode
     print("Setting up data...")
     data = setup_data(exp)
     print("Setting up model...")
@@ -684,4 +778,11 @@ def main(args):
 
 if __name__ == "__main__":
     parser = get_common_parser("Fine-tune SAM on KITTI-MOTS.")
+    parser.add_argument(
+        "--target_mode",
+        type=str,
+        choices=["instance", "semantic"],
+        default="semantic",
+        help="instance: train on per-instance masks; semantic: collapse same-class objects to shared pixel targets.",
+    )
     main(parser.parse_args())

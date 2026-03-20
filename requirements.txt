@@ -19,3 +19,8 @@ albumentations
 thop # For calculating FLOPs
 timm # For loading models
 peft # For LoRA fine-tuning
+
+# Session 3
+nltk
+rouge_score
+evaluate

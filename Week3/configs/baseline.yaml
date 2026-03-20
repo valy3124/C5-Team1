@@ -1,0 +1,17 @@
+model:
+  encoder: "resnet18"
+  freeze_encoder: true  # Freeze encoder weights; only train decoder + projection
+
+training:
+  epochs: 50
+  batch_size: 128
+  lr: 0.0005
+  scheduler: "plateau"
+  num_workers: 4
+  grad_clip: 5.0  # Max gradient norm; set to 0 to disable
+
+data:
+  mode: "full"
+
+project: "C5-ImageCaptioning"
+output_dir: "results/baseline/full"

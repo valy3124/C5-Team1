@@ -2,7 +2,7 @@ import time
 import torch
 import numpy as np
 from PIL import Image
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 
 from transformers import (
     AutoProcessor,
@@ -42,6 +42,29 @@ class GroundedSamWrapper:
     DEFAULT_DINO_ID = "IDEA-Research/grounding-dino-tiny"
     DEFAULT_SAM_ID  = "facebook/sam-vit-base"
 
+    # Default label → COCO class-id mapping for KITTI-MOTS
+    # COCO: 1=person, 3=car
+    DEFAULT_LABEL_TO_CLASS_ID: Dict[str, int] = {
+        # person synonyms (COCO id=1)
+        "person":     1,
+        "pedestrian": 1,
+        "people":     1,
+        "man":        1,
+        "woman":      1,
+        "human":      1,
+        "cyclist":    1,
+        "walker":     1,
+        # car synonyms (COCO id=3)
+        "car":        3,
+        "vehicle":    3,
+        "automobile": 3,
+        "truck":      3,
+        "van":        3,
+        "sedan":      3,
+        "suv":        3,
+        "bus":        3,
+    }
+
     def __init__(
         self,
         dino_model_id: str = DEFAULT_DINO_ID,
@@ -49,6 +72,7 @@ class GroundedSamWrapper:
         box_threshold: float  = 0.35,
         text_threshold: float = 0.25,
         device: str = None,
+        label_to_class_id: Optional[Dict[str, int]] = None,
     ):
         """
         Parameters
@@ -64,6 +88,10 @@ class GroundedSamWrapper:
         device : str, optional
             Target device string (``"cuda"``, ``"cpu"``, …).
             Auto-detected when *None*.
+        label_to_class_id : dict, optional
+            Mapping from detected text label (lowercase) to integer class id.
+            Used by ``predict_semantic()``.  Defaults to
+            ``DEFAULT_LABEL_TO_CLASS_ID`` (KITTI-MOTS / COCO ids).
         """
         if device:
             self.device = device
@@ -77,6 +105,11 @@ class GroundedSamWrapper:
 
         self.box_threshold  = box_threshold
         self.text_threshold = text_threshold
+        self.label_to_class_id = (
+            label_to_class_id
+            if label_to_class_id is not None
+            else dict(self.DEFAULT_LABEL_TO_CLASS_ID)
+        )
 
         # ---- GroundingDINO ----
         print(f"Loading GroundingDINO ({dino_model_id}) on {self.device}...")
@@ -139,6 +172,133 @@ class GroundedSamWrapper:
 
         inference_time = time.time() - t_start
         return [masks_tensor], scores_tensor, inference_time, boxes, coco_cat_ids
+
+    def predict_semantic(
+        self,
+        image: Image.Image,
+        prompt_dict: Dict[str, Any],
+    ) -> Tuple[np.ndarray, float]:
+        """
+        Run Grounded SAM and produce a **semantic segmentation map**.
+
+        Unlike ``predict()``, this method merges all per-instance masks into a
+        single ``(H, W)`` integer array where each pixel holds the class id
+        (from ``label_to_class_id``) of the highest-confidence detection that
+        covers it (background = 0).
+
+        Returns
+        -------
+        semantic_map : np.ndarray, shape (H, W), dtype int32
+        inference_time : float
+        """
+        t_start = time.time()
+        text_labels = prompt_dict.get("text", "person. car.")
+        h, w = image.size[1], image.size[0]
+        semantic_map = np.zeros((h, w), dtype=np.int32)
+
+        boxes, det_scores, det_labels = self._run_grounding_dino(image, text_labels)
+
+        if len(boxes) == 0:
+            return semantic_map, time.time() - t_start
+
+        masks_tensor, scores_tensor = self._run_sam(image, boxes, det_scores)
+        # masks_tensor: (1, N, 3, H, W) — squeeze batch dim
+        masks_out  = masks_tensor.squeeze(0)          # (N, 3, H, W)
+        scores_out = scores_tensor.squeeze(0)         # (N, 3)
+        if scores_out.dim() == 1:
+            scores_out = scores_out.unsqueeze(0)
+
+        # Select best mask candidate per detection and pick its class id.
+        # Process detections from lowest to highest confidence so that the
+        # most-confident mask wins on overlapping pixels.
+        best_idx_per_det   = scores_out.argmax(dim=-1)          # (N,)
+        best_score_per_det = scores_out[torch.arange(len(boxes)), best_idx_per_det]  # (N,)
+        order = torch.argsort(best_score_per_det)               # ascending
+
+        for j in order.tolist():
+            class_id = self._resolve_class_id(det_labels[j])
+            if class_id == 0:
+                continue
+            mask_np = masks_out[j, int(best_idx_per_det[j])].cpu().numpy()  # (H, W) bool
+            semantic_map[mask_np] = class_id
+
+        return semantic_map, time.time() - t_start
+
+    def predict_semantic_open(
+        self,
+        image: Image.Image,
+        prompt_dict: Dict[str, Any],
+    ) -> Tuple[np.ndarray, Dict[int, str], float]:
+        """
+        Open-vocabulary semantic segmentation: segment *any* detected class
+        without requiring a fixed ``label_to_class_id`` mapping.
+
+        Each unique detected label is assigned a sequential integer id starting
+        from 1.  Background = 0.  The returned ``id_to_label`` dict lets callers
+        build a dynamic legend / colour palette.
+
+        Returns
+        -------
+        semantic_map : np.ndarray, shape (H, W), dtype int32
+        id_to_label : dict[int, str]   e.g. {1: "person", 2: "car", 3: "tree"}
+        inference_time : float
+        """
+        t_start = time.time()
+        text_labels = prompt_dict.get("text", "person. car.")
+        h, w = image.size[1], image.size[0]
+        semantic_map = np.zeros((h, w), dtype=np.int32)
+
+        boxes, det_scores, det_labels = self._run_grounding_dino(image, text_labels)
+
+        if len(boxes) == 0:
+            return semantic_map, {}, time.time() - t_start
+
+        # Build a dynamic label → sequential id mapping
+        label_to_id: Dict[str, int] = {}
+        id_to_label: Dict[int, str] = {}
+        next_id = 1
+        for lbl in det_labels:
+            key = lbl.lower().strip().rstrip(".")
+            if key not in label_to_id:
+                label_to_id[key] = next_id
+                id_to_label[next_id] = key
+                next_id += 1
+
+        masks_tensor, scores_tensor = self._run_sam(image, boxes, det_scores)
+        masks_out  = masks_tensor.squeeze(0)   # (N, 3, H, W)
+        scores_out = scores_tensor.squeeze(0)  # (N, 3)
+        if scores_out.dim() == 1:
+            scores_out = scores_out.unsqueeze(0)
+
+        best_idx_per_det   = scores_out.argmax(dim=-1)
+        best_score_per_det = scores_out[torch.arange(len(boxes)), best_idx_per_det]
+        order = torch.argsort(best_score_per_det)   # ascending: best overwrites
+
+        for j in order.tolist():
+            key      = det_labels[j].lower().strip().rstrip(".")
+            class_id = label_to_id.get(key, 0)
+            if class_id == 0:
+                continue
+            mask_np = masks_out[j, int(best_idx_per_det[j])].cpu().numpy()
+            semantic_map[mask_np] = class_id
+
+        return semantic_map, id_to_label, time.time() - t_start
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_class_id(self, label: str) -> int:
+        """Map a detected text label to its integer class id (0 = unknown)."""
+        label_lower = label.lower().strip().rstrip(".")
+        # Exact match first
+        if label_lower in self.label_to_class_id:
+            return self.label_to_class_id[label_lower]
+        # Substring match
+        for key, cid in self.label_to_class_id.items():
+            if key in label_lower or label_lower in key:
+                return cid
+        return 0
 
 
     @torch.no_grad()
@@ -208,6 +368,7 @@ class GroundedSamWrapper:
         scores_tensor : torch.Tensor
             Shape ``(1, N, 3)`` — IoU confidence per candidate mask.
         """
+        # Note: det_scores unused here — SAM's iou_scores are used for ranking
         input_boxes = [[[box] for box in boxes]]
 
         inputs = self.sam_processor(

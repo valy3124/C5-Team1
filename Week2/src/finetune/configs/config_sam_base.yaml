@@ -3,7 +3,7 @@ model:
   model_id: "facebook/sam-vit-base"
 
 training:
-  epochs: 15
+  epochs: 5
   batch_size: 8 # maximum, 16 causes OOM
   lr: 0.00005
   weight_decay: 0
@@ -21,4 +21,4 @@ data:
   num_workers: 4
   
 project: "Week2-SAM-finetuning"
-output_dir: "/ghome/group01/C5/benet/C5-Team1/Week2/results_finetune"
+output_dir: "/ghome/group01/C5/vali/C5-Team1/Week2/results_finetune"

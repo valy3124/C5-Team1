@@ -1,0 +1,38 @@
+program: train.py
+project: "C5-ImageCaptioning-sweep-decoder"
+method: grid
+metric:
+  name: best_METEOR
+  goal: maximize
+
+parameters:
+  encoder:
+    value: "clip-vit-b32"
+  decoder_type:
+    values: ["xlstm", "gru", "lstm"]
+  decoder_dim:
+    values: [512, 1024]
+  decoder_layers:
+    values: [3]
+  embed_dim:
+    value: 512
+  lr:
+    value: 0.0005
+  mode:
+    value: "search"
+  epochs:
+    value: 10
+  batch_size:
+    value: 128
+  num_workers:
+    value: 4
+  output_dir:
+    value: "results/decoder_sweep"
+  freeze_encoder:
+    value: true
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}

@@ -1,0 +1,19 @@
+project: "C5-ImageCaptioning-sweep-text-level"
+output_dir: "results/text_level_sweep"
+
+model:
+  encoder: "clip-vit-b32"
+  freeze_encoder: true
+  decoder_type: "xlstm"
+  decoder_dim: 512
+  decoder_layers: 2
+  embed_dim: 512
+  text_level: "subword"
+  clip_embeddings: true
+  freeze_embeddings: true
+
+training:
+  lr: 0.0005
+  batch_size: 128
+  epochs: 10
+  mode: "search"

@@ -1,0 +1,17 @@
+model:
+  encoder: "vgg19"
+  freeze_encoder: true
+
+data:
+  mode: "search"
+
+training:
+  epochs: 10
+  batch_size: 128
+  lr: 0.0005
+  num_workers: 4
+  scheduler: "plateau"
+  grad_clip: 5.0
+
+output_dir: "results/encoder_sweep"
+project: "C5-ImageCaptioning-sweep-encoder"
