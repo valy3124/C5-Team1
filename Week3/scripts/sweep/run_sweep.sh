@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -n 4
 #SBATCH --mem 24G
-#SBATCH -p mlow
+#SBATCH -p mhigh
 #SBATCH --gres gpu:1
-#SBATCH -o logs-text-level/sweep_%u_%j.out
-#SBATCH -e logs-text-level/sweep_%u_%j.err
+#SBATCH -o logs/sweep_%u_%j.out
+#SBATCH -e logs/sweep_%u_%j.err
 
 SWEEP_ID=$1
 PROJECT=$2
@@ -17,7 +17,7 @@ if [ -z "$SWEEP_ID" ] || [ -z "$PROJECT" ]; then
 fi
 
 set -e
-cd /ghome/group01/C5/benet/C5-Team1/Week3
+cd /ghome/group01/C5/xavi/C5-Team1/Week3
 
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5

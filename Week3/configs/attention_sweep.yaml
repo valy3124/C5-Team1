@@ -1,0 +1,42 @@
+program: train.py
+project: "C5-ImageCaptioning-sweep-attention"
+method: grid
+metric:
+  name: best_METEOR
+  goal: maximize
+
+parameters:
+  encoder:
+    value: "clip-vit-b32"
+  decoder_type:
+    values: ["gru"]
+  decoder_dim:
+    values: [1024]
+  decoder_layers:
+    values: [2]
+  embed_dim:
+    value: 1024
+  lr:
+    value: 0.0005
+  mode:
+    value: "search"
+  epochs:
+    value: 10
+  batch_size:
+    value: 128
+  num_workers:
+    value: 4
+  output_dir:
+    value: "results/attention_sweep"
+  freeze_encoder:
+    value: true
+  attn_type:
+    values: ["soft", "adaptive"]
+  text_level:
+    value: "word"
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}
