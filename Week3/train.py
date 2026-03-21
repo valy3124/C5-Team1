@@ -33,7 +33,7 @@ bleu   = evaluate.load('bleu')
 rouge  = evaluate.load('rouge')
 meteor = evaluate.load('meteor')
 try:
-    cider = evaluate.load('cider')
+    cider = evaluate.load('sunhill/cider')
     CIDER_AVAILABLE = True
 except Exception as e:
     cider = None
@@ -551,8 +551,8 @@ def eval_epoch(model, dataloader, crit, tokenizer):
 
         cider_score = cider_score_old = 0.0
         if CIDER_AVAILABLE:
-            cider_score     = cider.compute(predictions=all_preds, references=all_refs)['cider'] * 100
-            cider_score_old = cider.compute(predictions=all_preds, references=all_refs_old)['cider'] * 100
+            cider_score     = cider.compute(predictions=all_preds, references=all_refs)['cider_score'] * 100
+            cider_score_old = cider.compute(predictions=all_preds, references=all_refs_old)['cider_score'] * 100
 
         metrics = {
             "BLEU-1":  bleu1['bleu'] * 100 if bleu1 else 0.0,
