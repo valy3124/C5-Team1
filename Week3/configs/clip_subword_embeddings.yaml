@@ -10,7 +10,7 @@ model:
   embed_dim: 512
   text_level: "subword"
   clip_embeddings: true
-  freeze_embeddings: true
+  freeze_embeddings: false
 
 training:
   lr: 0.0005
