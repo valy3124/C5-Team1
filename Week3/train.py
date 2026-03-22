@@ -72,6 +72,11 @@ def parse_args():
                         help='Type of visual attention to use. "soft", "adaptive", or "early_fusion" (recommended for xLSTM)')
     parser.add_argument('--attn_dim', type=int, default=None,
                         help='Hidden dimension of the attention scoring network (default 256)')
+    # --- Sweep Parameters ---
+    parser.add_argument('--optimizer', type=str, choices=['adam', 'adamw', 'sgd'])
+    parser.add_argument('--scheduler', type=str, choices=['plateau', 'cosine', 'step'])
+    parser.add_argument('--generation_method', type=str, choices=['greedy', 'beam'])
+    parser.add_argument('--beam_size', type=int, default=3)
 
     args = parser.parse_args()
 
@@ -102,6 +107,12 @@ def parse_args():
     final_cfg.freeze_embeddings = args.freeze_embeddings if args.freeze_embeddings is not None else cfg.get('model', {}).get('freeze_embeddings', False)
     final_cfg.attn_type     = args.attn_type if args.attn_type is not None else cfg.get('model', {}).get('attn_type', None)
     final_cfg.attn_dim      = args.attn_dim      if args.attn_dim      is not None else cfg.get('model', {}).get('attn_dim', 256)
+    
+    # Sweep parameters
+    final_cfg.optimizer         = args.optimizer         if args.optimizer         is not None else cfg.get('training', {}).get('optimizer', 'adam')
+    final_cfg.scheduler         = args.scheduler         if args.scheduler         is not None else cfg.get('training', {}).get('scheduler', 'plateau')
+    final_cfg.generation_method = args.generation_method if args.generation_method is not None else cfg.get('model', {}).get('generation_method', 'greedy')
+    final_cfg.beam_size         = args.beam_size         if args.beam_size         is not None else cfg.get('model', {}).get('beam_size', 3)
     
     # Retrocompatibility with old configs
     if final_cfg.attn_type is None and cfg.get('model', {}).get('use_attention', False):
@@ -178,6 +189,7 @@ def generate_attention_visualizations(
         for pred_str, ref_strs, img_name, img_tensor in sample_data:
             img_input = img_tensor.unsqueeze(0).to(DEVICE)     # (1, C, H, W)
             orig_img  = PILImage.open(os.path.join(img_dir, img_name)).convert('RGB')
+            orig_w, orig_h = orig_img.size
             orig_arr  = np.array(orig_img)
             
             # --- early_fusion (xLSTM) Plotting Route ---
@@ -472,7 +484,7 @@ def train_one_epoch(model, optimizer, crit, dataloader, epoch, grad_clip=5.0):
     return total_loss / len(dataloader), avg_grad_norm, max_grad_norm
 
 
-def eval_epoch(model, dataloader, crit, tokenizer):
+def eval_epoch(model, dataloader, crit, tokenizer, generation_method='greedy', beam_size=3):
     model.eval()
     all_preds, all_refs, all_refs_old = [], [], []
     total_images         = 0
@@ -508,7 +520,7 @@ def eval_epoch(model, dataloader, crit, tokenizer):
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t0   = time.perf_counter()
-            pred = model(img)
+            pred = model(img, generation_method=generation_method, beam_size=beam_size)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t1   = time.perf_counter()
@@ -710,9 +722,19 @@ def main():
         attn_dim=cfg.attn_dim,
     ).to(DEVICE)
 
-    optimizer = torch.optim.Adam(
-        filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr
-    )
+    if cfg.optimizer == 'adamw':
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr
+        )
+    elif cfg.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(
+            filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr, momentum=0.9
+        )
+    else:
+        optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.lr
+        )
+
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     wandb.config.update(
         {"trainable_params": trainable_params, "vocab_size": tokenizer.vocab_size},
@@ -725,6 +747,12 @@ def main():
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.5, patience=5, verbose=True
         )
+    elif cfg.scheduler == "cosine":
+        print("Using CosineAnnealingLR scheduler")
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+    elif cfg.scheduler == "step":
+        print("Using StepLR scheduler")
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
     crit = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_idx)
 
@@ -741,7 +769,10 @@ def main():
             f"Grad Norm (avg/max): {avg_grad_norm:.3f} / {max_grad_norm:.3f}"
         )
 
-        metrics, eval_samples = eval_epoch(model, dataloader_valid, crit, tokenizer)
+        metrics, eval_samples = eval_epoch(
+            model, dataloader_valid, crit, tokenizer,
+            generation_method=cfg.generation_method, beam_size=cfg.beam_size
+        )
 
         # Save visual samples (done once at epoch 1)
         epoch_samples = []
@@ -821,7 +852,7 @@ def main():
 
         # --- Attention visualizations for all epochs ---
         is_new_best = (epoch == best_epoch)
-        if cfg.attn_type:
+        if cfg.attn_type and False: # Desactivado temporalmente para el sweep
             generate_attention_visualizations(
                 model=model,
                 tokenizer=tokenizer,

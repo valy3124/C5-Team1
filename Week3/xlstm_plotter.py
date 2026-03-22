@@ -18,7 +18,7 @@ def plot_xlstm_visualizations(image_tensor, pseudo_attn_maps, surprise_map, gene
     img_np = img.permute(1, 2, 0).numpy()
     
     H, W = img_np.shape[:2]
-    words = [idx2char.get(t.item(), '<UNK>') for t in generated_tokens]
+    words = [idx2char.get(t if isinstance(t, int) else t.item(), '<UNK>') for t in generated_tokens]
     num_tokens = len(words)
     
     # 1. Plot Surprise Map

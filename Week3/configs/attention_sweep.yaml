@@ -1,5 +1,5 @@
 program: train.py
-project: "C5-ImageCaptioning-sweep-attention"
+project: "C5-ImageCaptioning-sweep-full"
 method: grid
 metric:
   name: best_METEOR
@@ -9,17 +9,25 @@ parameters:
   encoder:
     value: "clip-vit-b32"
   decoder_type:
-    values: ["gru"]
+    value: "lstm"
   decoder_dim:
-    values: [1024]
+    value: 1024
   decoder_layers:
-    values: [2]
+    value: 3
   embed_dim:
     value: 1024
   lr:
     value: 0.0005
+  optimizer:
+    value: "adam"
+  scheduler:
+    value: "cosine"
+  generation_method:
+    value: "beam"
+  beam_size:
+    value: 3
   mode:
-    value: "search"
+    value: "full"
   epochs:
     value: 10
   batch_size:
@@ -27,11 +35,13 @@ parameters:
   num_workers:
     value: 4
   output_dir:
-    value: "results/attention_sweep"
+    value: "results/full_sweep"
   freeze_encoder:
     value: true
   attn_type:
-    values: ["soft", "adaptive"]
+    value: "adaptive"
+  attn_dim:
+    value: 256
   text_level:
     value: "word"
 

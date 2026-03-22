@@ -384,6 +384,8 @@ class ImageCaptioningModel(nn.Module):
         img: torch.Tensor,
         target_caption: torch.Tensor = None,
         return_attention: bool = False,
+        generation_method: str = "greedy",
+        beam_size: int = 3,
     ):
         """
         Args:
@@ -510,8 +512,11 @@ class ImageCaptioningModel(nn.Module):
             return res.permute(0, 2, 1)                                      # (B,vocab,T-1)
 
         # ==============================================================
-        #  GREEDY INFERENCE
+        #  GREEDY / BEAM INFERENCE
         # ==============================================================
+        if target_caption is None and generation_method == "beam" and self.attn_type == "adaptive" and self.decoder_type in ['lstm', 'gru']:
+            return self._beam_search_adaptive(img, features, h0, beam_size, return_attention)
+
         if self.attn_type == 'early_fusion':
             sep = self.visual_separator.expand(batch_size, -1, -1)
             full_prefix = torch.cat([features, sep], dim=1)
@@ -583,6 +588,89 @@ class ImageCaptioningModel(nn.Module):
         result = torch.cat(all_preds, dim=2)                                # (B, vocab, T)
         if return_attention and self.use_attention:
             return result, all_alphas
+        return result
+
+    def _beam_search_adaptive(self, img, features, h0, beam_size, return_attention):
+        device = img.device
+        batch_size = img.shape[0]
+        
+        all_res = []
+        for b in range(batch_size):
+            feat_b = features[b:b+1]
+            
+            if h0 is not None:
+                h0_b = h0[b:b+1]
+                hidden = h0_b.unsqueeze(0).repeat(self.decoder_layers, 1, 1)
+                if self.decoder_type == 'lstm':
+                    cell = torch.zeros_like(hidden)
+                    hidden = (hidden, cell)
+            else:
+                hidden = None
+                
+            beams = [(0.0, [self.sos_idx], hidden)]
+            
+            for step in range(self.max_len - 1):
+                new_beams = []
+                for score, seq, h_state in beams:
+                    if seq[-1] == self.eos_idx:
+                        new_beams.append((score, seq, h_state))
+                        continue
+                        
+                    curr_token_tensor = torch.tensor([seq[-1]], device=device, dtype=torch.long)
+                    inp = self.embed(curr_token_tensor).unsqueeze(1)
+                    
+                    if self.decoder_type == 'lstm':
+                        out, next_h_state = self.decoder(inp, h_state)
+                        h_t = next_h_state[0][-1]
+                    else:
+                        out, next_h_state = self.decoder(inp, h_state)
+                        h_t = next_h_state[-1]
+                        
+                    context, alpha = self.attention(feat_b, h_t)
+                    
+                    h_att = torch.tanh(self.adaptive_context_proj(torch.cat([context, h_t], dim=-1)))
+                    out = h_att.unsqueeze(1)
+                    
+                    logits = self.proj(out.squeeze(1))
+                    log_probs = torch.log_softmax(logits, dim=-1)[0]
+                    
+                    topk_probs, topk_idx = torch.topk(log_probs, beam_size)
+                    
+                    for i in range(beam_size):
+                        next_score = score + topk_probs[i].item()
+                        next_seq = seq + [topk_idx[i].item()]
+                        new_beams.append((next_score, next_seq, next_h_state))
+                        
+                beams = sorted(new_beams, key=lambda x: x[0], reverse=True)[:beam_size]
+                if all(b[1][-1] == self.eos_idx for b in beams):
+                    break
+                    
+            best_beam = beams[0]
+            best_seq = best_beam[1][1:]
+            
+            if len(best_seq) < self.max_len - 1:
+                best_seq.extend([self.pad_idx] * (self.max_len - 1 - len(best_seq)))
+            else:
+                best_seq = best_seq[:self.max_len - 1]
+                
+            b_res = torch.zeros((self.vocab_size, self.max_len - 1), device=device)
+            # Create a one-hot like target for argmax
+            for t, token_id in enumerate(best_seq):
+                if token_id >= 0 and token_id < self.vocab_size:
+                    b_res[token_id, t] = 100.0
+                
+            all_res.append(b_res.unsqueeze(0))
+            
+        result = torch.cat(all_res, dim=0)
+        
+        if return_attention:
+            # Create correctly shaped dummy alphas to avoid crashing visualization grid calculations
+            alpha_size = features.size(1)
+            if self.attn_type == 'adaptive':
+                alpha_size += 1
+            dummy_alphas = [torch.zeros((batch_size, alpha_size), device='cpu') for _ in range(self.max_len - 1)]
+            return result, dummy_alphas
+            
         return result
 
     def generate_with_saliency(self, img: torch.Tensor):

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -n 4
 #SBATCH --mem 24G
-#SBATCH -p mhigh
+#SBATCH -p mlow
 #SBATCH --gres gpu:1
 #SBATCH -o logs/sweep_%u_%j.out
 #SBATCH -e logs/sweep_%u_%j.err
