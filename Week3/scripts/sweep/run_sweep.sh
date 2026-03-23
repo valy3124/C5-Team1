@@ -17,7 +17,7 @@ if [ -z "$SWEEP_ID" ] || [ -z "$PROJECT" ]; then
 fi
 
 set -e
-cd /ghome/group01/C5/xavi/C5-Team1/Week3
+cd /ghome/group01/C5/vali/C5-Team1/Week3
 
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
