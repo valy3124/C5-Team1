@@ -1,0 +1,19 @@
+program: src/finetune.py
+method: grid
+project: C5-Week4-ImageCaptioning
+metric:
+  goal: maximize
+  name: val/METEOR
+parameters:
+  model_type:
+    value: "vit-gpt2"
+  strategy:
+    values: [1,2,3]
+  batch_size:
+    value: 16
+  epochs:
+    value: 10
+  lr:
+    value: 5e-5
+  mode:
+    value: full
