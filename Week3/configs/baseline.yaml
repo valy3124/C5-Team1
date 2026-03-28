@@ -3,7 +3,7 @@ model:
   freeze_encoder: true  # Freeze encoder weights; only train decoder + projection
 
 training:
-  epochs: 50
+  epochs: 10
   batch_size: 128
   lr: 0.0005
   scheduler: "plateau"

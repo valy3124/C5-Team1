@@ -13,7 +13,7 @@
 ENCODER=$1
 
 set -e
-cd /ghome/group01/C5/benet/C5-Team1/Week3
+cd /ghome/group01/C5/vali/C5-Team1/Week3
 
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
@@ -27,7 +27,7 @@ else
     echo "Encoder override: $ENCODER"
 fi
 
-python train.py \
+python src/train.py \
     --config configs/encoder_single.yaml \
     ${ENCODER:+--encoder "$ENCODER"}
 
