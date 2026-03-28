@@ -13,6 +13,8 @@ Week2/src/results_inference/
 Week2/results_finetune/
 Week2/results_eval/
 Week3/dataset/
+Week3/results/
+Week3/logs/
 *.jsonl
 *.log
 *.out
