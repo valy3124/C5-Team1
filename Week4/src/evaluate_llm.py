@@ -4,6 +4,10 @@ import time
 import json
 import torch
 import evaluate
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import textwrap
 from PIL import Image as PILImage
 from tqdm import tqdm
 
@@ -31,30 +35,22 @@ except Exception as e:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Large Multimodal Models (Llama 3.2, Qwen2-VL)")
-    parser.add_argument("--model_type", type=str, default="qwen3.5-9b", 
-                        choices=["llama3.2-11b", "qwen2-vl", "qwen3-vl-8b", "qwen3.5-9b"],
+    parser.add_argument("--model_type", type=str, default="Qwen3.5-9B", 
+                        choices=["Qwen3.5-9B", "Qwen3-VL-8B-Instruct", "Qwen2.5-VL-7B-Instruct", "Qwen2-VL-7B-Instruct"],
                         help="Which Vision LLM to evaluate")
     parser.add_argument("--mode", type=str, default="search",
                         choices=["full", "search"],
                         help="'search' uses smaller subset of data, 'full' uses all.")
     parser.add_argument("--output_dir", type=str, default="../results")
+    parser.add_argument("--max_tokens", type=int, default=128,
+                        help="Maximum new tokens to generate")
     return parser.parse_args()
 
 
 def load_model_and_processor(model_type):
     print(f"Loading Model: {model_type} loading onto {DEVICE} in bfloat16 to fit in memory...")
     
-    if model_type == 'llama3.2-11b':
-        from transformers import MllamaForConditionalGeneration, AutoProcessor
-        model_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
-        processor = AutoProcessor.from_pretrained(model_id)
-        model = MllamaForConditionalGeneration.from_pretrained(
-            model_id, 
-            torch_dtype=torch.bfloat16,
-            device_map="auto"
-        )
-        
-    elif model_type == 'qwen2-vl':
+    if model_type == 'Qwen2-VL-7B-Instruct':
         # Using a Qwen2-VL model equivalent roughly in scale
         from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
         model_id = "Qwen/Qwen2-VL-7B-Instruct"
@@ -64,7 +60,7 @@ def load_model_and_processor(model_type):
             torch_dtype=torch.bfloat16,
             device_map="auto"
         )
-    elif model_type == 'qwen3-vl-8b':
+    elif model_type == 'Qwen3-VL-8B-Instruct':
         from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
         model_id = "Qwen/Qwen3-VL-8B-Instruct"
         processor = AutoProcessor.from_pretrained(model_id)
@@ -73,7 +69,16 @@ def load_model_and_processor(model_type):
             torch_dtype=torch.bfloat16,
             device_map="auto"
         )
-    elif model_type == 'qwen3.5-9b':
+    elif model_type == 'Qwen2.5-VL-7B-Instruct':
+        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        model_id = "Qwen/Qwen2.5-VL-7B-Instruct"
+        processor = AutoProcessor.from_pretrained(model_id)
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto"
+        )
+    elif model_type == 'Qwen3.5-9B':
         from transformers import AutoModelForImageTextToText, AutoProcessor
         model_id = "Qwen/Qwen3.5-9B"
         processor = AutoProcessor.from_pretrained(model_id)
@@ -89,8 +94,8 @@ def load_model_and_processor(model_type):
     return model, processor
 
 
-def generate_caption(img, model, processor, model_type):
-    prompt_text = "Provide a brief and concise caption for this image."
+def generate_caption(img, model, processor, model_type, max_tokens):
+    prompt_text = "Provide a brief and concise caption for this image. Answer in a single short sentence (less than 20 words)."
 
     if model_type == "llama3.2-11b":
         messages = [
@@ -103,13 +108,13 @@ def generate_caption(img, model, processor, model_type):
         inputs = processor(images=img, text=input_text, return_tensors="pt").to(model.device)
         
         with torch.inference_mode():
-            generated_ids = model.generate(**inputs, max_new_tokens=30)
+            generated_ids = model.generate(**inputs, max_new_tokens=max_tokens)
             
         generated_ids = generated_ids[:, inputs.input_ids.shape[1]:]
         generated_texts = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
         return generated_texts[0].strip()
         
-    elif model_type in ['qwen2-vl', 'qwen3-vl-8b', 'qwen3.5-9b']:
+    elif model_type in ['Qwen2-VL-7B-Instruct', 'Qwen3-VL-8B-Instruct', 'Qwen3.5-9B', 'Qwen2.5-VL-7B-Instruct']:
         messages = [
             {"role": "user", "content": [
                 {"type": "image", "image": img},
@@ -120,8 +125,6 @@ def generate_caption(img, model, processor, model_type):
         inputs = processor(text=[input_text], images=[img], padding=True, return_tensors="pt").to(model.device)
         
         with torch.inference_mode():
-            # Qwen3.5 might output <think> reasoning blocks, so increase token length
-            max_tokens = 512 if model_type == 'qwen3.5-9b' else 50
             generated_ids = model.generate(**inputs, max_new_tokens=max_tokens)
             
         generated_ids_trimmed = [
@@ -145,16 +148,17 @@ def generate_caption(img, model, processor, model_type):
         raise ValueError("Invalid model type")
 
 
-def eval_dataset(model, processor, dataset, model_type, out_dir):
+def eval_dataset(model, processor, dataset, model_type, max_tokens, out_dir):
     all_preds = []
     all_refs = []
     all_img_ids = []
+    all_img_names = []
     
     # We iterate sequentially with index because batched inference with mixed image sizes in Vision LLMs is complex
     for i in tqdm(range(len(dataset)), desc="Evaluating VLM"):
         img, img_id, img_name = dataset[i]
         
-        pred = generate_caption(img, model, processor, model_type)
+        pred = generate_caption(img, model, processor, model_type, max_tokens)
         all_preds.append(pred)
         
         # Collect references
@@ -162,6 +166,7 @@ def eval_dataset(model, processor, dataset, model_type, out_dir):
         refs = dataset.image_captions[img_id_val]
         all_refs.append(refs)
         all_img_ids.append(img_id_val)
+        all_img_names.append(img_name)
 
     # Compute metrics
     metrics = {}
@@ -188,7 +193,7 @@ def eval_dataset(model, processor, dataset, model_type, out_dir):
         print(f"Failed computing metrics: {e}")
         metrics = {k: 0 for k in ["BLEU-1", "BLEU-2", "ROUGE-L", "METEOR", "CIDEr"]}
 
-    return metrics, all_preds, all_refs, all_img_ids
+    return metrics, all_preds, all_refs, all_img_ids, all_img_names
 
 def main():
     args = parse_args()
@@ -216,7 +221,42 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     
     # Run loop
-    metrics, preds, refs, img_ids = eval_dataset(model, processor, dataset_valid, args.model_type, out_dir)
+    metrics, preds, refs, img_ids, img_names = eval_dataset(model, processor, dataset_valid, args.model_type, args.max_tokens, out_dir)
+    
+    # Qualitative Logging
+    sample_indices = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450]
+    viz_dir = os.path.join(out_dir, "visual_samples")
+    os.makedirs(viz_dir, exist_ok=True)
+    
+    for idx in sample_indices:
+        if idx >= len(preds):
+            continue
+        
+        img_name = img_names[idx]
+        img_id = img_ids[idx]
+        pred_str = preds[idx]
+        ref_strs = refs[idx]
+        
+        try:
+            # Re-load image for visualization
+            img_path = os.path.join(val_img_dir, img_name)
+            img = PILImage.open(img_path).convert('RGB')
+            
+            fig, ax = plt.subplots(figsize=(8, 8))
+            ax.imshow(img)
+            ax.axis('off')
+            
+            wrapped_pred = textwrap.fill(f"Pred: {pred_str}", width=60)
+            wrapped_refs = textwrap.fill(f"Ref: {ref_strs[0]}", width=60)
+            if len(ref_strs) > 1:
+                wrapped_refs += "\n" + textwrap.fill(f"Ref2: {ref_strs[1]}", width=60)
+                
+            plt.suptitle(wrapped_pred + "\n" + wrapped_refs, fontsize=12)
+            plt.tight_layout()
+            plt.savefig(os.path.join(viz_dir, f"{img_name}_sample_{idx}.png"))
+            plt.close(fig)
+        except Exception as e:
+            print(f"Visualization failed for sample {idx}: {e}")
     
     print("\n================ Metrics ================")
     for k, v in metrics.items():

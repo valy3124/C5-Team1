@@ -11,15 +11,53 @@
 source /ghome/group01/miniconda3/etc/profile.d/conda.sh
 conda activate c5
 
-# Make sure you wait until the BLIP finetune finishes first!
-# Substitute "best_model_blip_mode_full_strategy_3" with the actual directory name created!
+BEST_MODEL=$1
 
-echo "Training custom VLM built from finetuned BLIP ViT + Qwen2.5 1.5B with LoRA"
-python src/train_custom_vlm.py \
-    --mode full \
-    --vision_model ../results/finetune_blip_both-finetune_full_20260326_015801/best_model \
-    --llm_model Qwen/Qwen2.5-1.5B-Instruct \
-    --epochs 5 \
-    --batch_size 4
+if [ -z "$BEST_MODEL" ]; then
+    echo "Usage: sbatch run_custom_vlm.sh <BEST_MODEL>"
+    echo "Example: sbatch run_custom_vlm.sh Qwen2.5-VL-7B-Instruct"
+    exit 1
+fi
 
-echo "Training Complete!"
+# The path to the previously finetuned BLIP model
+VISION_MODEL="/ghome/group01/C5/benet/C5-Team1/Week4/MODELS_ARRANGED/Task1/Task1.2/finetune_blip_both-finetune_full_20260324_220017/best_model"
+
+declare -a MODELS_TO_FINETUNE
+
+# Setup which models to finetune according to the best performing model
+case $BEST_MODEL in
+    "Qwen2-VL-7B-Instruct")
+        MODELS_TO_FINETUNE=("Qwen/Qwen2-VL-2B-Instruct")
+        ;;
+    "Qwen2.5-VL-7B-Instruct")
+        MODELS_TO_FINETUNE=("Qwen/Qwen2.5-VL-3B-Instruct")
+        ;;
+    "Qwen3-VL-8B-Instruct")
+        MODELS_TO_FINETUNE=("Qwen/Qwen3-VL-4B-Instruct" "Qwen/Qwen3-VL-2B-Instruct")
+        ;;
+    "Qwen3.5-9B")
+        MODELS_TO_FINETUNE=("Qwen/Qwen3.5-4B" "Qwen/Qwen3.5-2B" "Qwen/Qwen3.5-0.8B")
+        ;;
+    *)
+        echo "Unknown best model configuration string: $BEST_MODEL"
+        echo "Valid options: Qwen2-VL-7B-Instruct, Qwen2.5-VL-7B-Instruct, Qwen3-VL-8B-Instruct, Qwen3.5-9B"
+        exit 1
+        ;;
+esac
+
+OUTPUT_DIR="/ghome/group01/C5/benet/C5-Team1/Week4/MODELS_ARRANGED/results"
+
+for LLM in "${MODELS_TO_FINETUNE[@]}"; do
+    echo "======================================================================"
+    echo "Finetuning custom VLM with frozen BLIP and $LLM decoder using LoRA..."
+    echo "======================================================================"
+    python src/train_custom_vlm.py \
+        --mode full \
+        --vision_model "$VISION_MODEL" \
+        --llm_model "$LLM" \
+        --output_dir "$OUTPUT_DIR" \
+        --epochs 5 \
+        --batch_size 4
+done
+
+echo "All Training Complete!"

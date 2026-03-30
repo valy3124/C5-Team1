@@ -15,6 +15,7 @@ Week2/results_eval/
 Week3/dataset/
 Week3/results/
 Week3/logs/
+Week4/MODELS_ARRANGED/
 *.jsonl
 *.log
 *.out

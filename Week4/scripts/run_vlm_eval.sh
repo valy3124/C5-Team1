@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
-#SBATCH -p mhigh   # Switched from mlow to mhigh
+#SBATCH -p mlow   # Switched from mlow to mhigh
 #SBATCH -q masterhigh  # Added the QOS flag
 
 # Ensure Conda is initialized
@@ -20,16 +20,19 @@ conda activate c5
 
 # Make sure logs directory exists
 mkdir -p logs
-# Run eval for Qwen 3 VL 8B
-# echo "Evaluating Qwen2 VL..."
-# python src/evaluate_llm.py --model_type qwen2-vl --mode full --output_dir ../results
+# Run eval for all requested Qwen Models
+OUTPUT_DIR="/ghome/group01/C5/benet/C5-Team1/Week4/MODELS_ARRANGED/results"
 
-# # Run eval for Qwen 3 VL 8B
-# echo "Evaluating Qwen3 VL 8B..."
-# python src/evaluate_llm.py --model_type qwen3-vl-8b --mode full --output_dir ../results
+echo "Evaluating Qwen2-VL-7B-Instruct..."
+python src/evaluate_llm.py --model_type Qwen2-VL-7B-Instruct --mode full --output_dir $OUTPUT_DIR
 
-# Run eval for Qwen 3.5 9B
-echo "Evaluating Qwen3.5 9B..."
-python src/evaluate_llm.py --model_type qwen3.5-9b --mode full --output_dir ../results
+echo "Evaluating Qwen2.5-VL-7B-Instruct..."
+python src/evaluate_llm.py --model_type Qwen2.5-VL-7B-Instruct --mode full --output_dir $OUTPUT_DIR
+
+echo "Evaluating Qwen3-VL-8B-Instruct..."
+python src/evaluate_llm.py --model_type Qwen3-VL-8B-Instruct --mode full --output_dir $OUTPUT_DIR
+
+echo "Evaluating Qwen3.5-9B..."
+python src/evaluate_llm.py --model_type Qwen3.5-9B --mode full --output_dir $OUTPUT_DIR
 
 echo "Evaluations Complete!"
