@@ -5,6 +5,10 @@ import wandb
 import torch
 import torch.nn as nn
 from PIL import Image
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import textwrap
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import BlipVisionModel, AutoProcessor, AutoTokenizer, AutoModelForCausalLM
@@ -37,11 +41,27 @@ class CustomVLM(nn.Module):
             param.requires_grad = False
             
         print(f"Loading LLM {llm_name}...")
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_name, 
-            torch_dtype=torch.bfloat16, 
-            device_map="auto" # Using auto will handle GPU mapping
-        )
+        if "Qwen2.5-VL" in llm_name:
+            from transformers import Qwen2_5_VLForConditionalGeneration
+            self.llm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                llm_name, torch_dtype=torch.bfloat16, device_map="auto"
+            )
+        elif "Qwen3-VL" in llm_name:
+            from transformers import Qwen3VLForConditionalGeneration
+            self.llm = Qwen3VLForConditionalGeneration.from_pretrained(
+                llm_name, torch_dtype=torch.bfloat16, device_map="auto"
+            )
+        elif "Qwen2-VL" in llm_name:
+            from transformers import Qwen2VLForConditionalGeneration
+            self.llm = Qwen2VLForConditionalGeneration.from_pretrained(
+                llm_name, torch_dtype=torch.bfloat16, device_map="auto"
+            )
+        else:
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                llm_name, 
+                torch_dtype=torch.bfloat16, 
+                device_map="auto" # Using auto will handle GPU mapping
+            )
         
         # Apply LoRA to LLM
         lora_config = LoraConfig(
@@ -129,10 +149,11 @@ class CustomVLM(nn.Module):
         return input_ids[:, 1:]
 
 class TrainDatasetWrapper(Dataset):
-    def __init__(self, base_dataset, tokenizer, max_length=64):
+    def __init__(self, base_dataset, tokenizer, max_length=128):
         self.base_dataset = base_dataset
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.prompt_text = "Provide a brief and concise caption for this image. Answer in a single short sentence (less than 20 words). "
         
         self.train_samples = []
         for img_id in self.base_dataset.valid_image_ids:
@@ -152,8 +173,9 @@ class TrainDatasetWrapper(Dataset):
         img = Image.open(img_path).convert('RGB')
         pixel_values = self.base_dataset.img_proc(img)
         
+        full_text = self.prompt_text + caption
         text_inputs = self.tokenizer(
-            caption, 
+            full_text, 
             padding='max_length', 
             truncation=True, 
             max_length=self.max_length, 
@@ -167,17 +189,29 @@ class TrainDatasetWrapper(Dataset):
         labels = input_ids.clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
         
+        # Mask out the prompt tokens from the loss
+        prompt_len = len(self.tokenizer(self.prompt_text).input_ids)
+        labels[:prompt_len] = -100
+        
         return pixel_values, input_ids, attention_mask, labels
 
-def eval_epoch(model, tokenizer, dataloader_valid):
+def eval_epoch(model, tokenizer, dataloader_valid, epoch, out_dir):
     model.eval()
     all_preds = []
     all_refs = []
     
-    # Evaluate taking only 1 prediction per image
     base_ds = dataloader_valid.dataset.base_dataset
+    prompt_text = "Provide a brief and concise caption for this image. Answer in a single short sentence (less than 20 words). "
     
-    valid_ids_sub = base_ds.valid_image_ids[:100] # Subsample for speed during training eval
+    sample_indices = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450]
+    valid_ids_sub = base_ds.valid_image_ids[:100].copy()
+    for idx_val in sample_indices:
+        if idx_val < len(base_ds.valid_image_ids) and base_ds.valid_image_ids[idx_val] not in valid_ids_sub:
+            valid_ids_sub.append(base_ds.valid_image_ids[idx_val])
+            
+    viz_dir = os.path.join(out_dir, f"visual_samples_epoch_{epoch}")
+    os.makedirs(viz_dir, exist_ok=True)
+    
     for img_id in tqdm(valid_ids_sub, desc="Evaluating"):
         img_name = base_ds.images[img_id]
         img_path = os.path.join(base_ds.img_dir, img_name)
@@ -185,13 +219,32 @@ def eval_epoch(model, tokenizer, dataloader_valid):
         pixel_values = base_ds.img_proc(img)
         pixel_values = pixel_values.unsqueeze(0) # Batch size 1
         
-        preds_ids = model.generate(pixel_values, tokenizer)
+        preds_ids = model.generate(pixel_values, tokenizer, max_new_tokens=128, prompt_text=prompt_text)
         pred_text = tokenizer.decode(preds_ids[0], skip_special_tokens=True)
         all_preds.append(pred_text)
         
         refs = base_ds.image_captions[img_id]
         all_refs.append(refs)
         
+        original_idx = base_ds.valid_image_ids.index(img_id)
+        if original_idx in sample_indices:
+            try:
+                fig, ax = plt.subplots(figsize=(8, 8))
+                ax.imshow(img)
+                ax.axis('off')
+                
+                wrapped_pred = textwrap.fill(f"Pred: {pred_text}", width=60)
+                wrapped_refs = textwrap.fill(f"Ref: {refs[0]}", width=60)
+                if len(refs) > 1:
+                    wrapped_refs += "\n" + textwrap.fill(f"Ref2: {refs[1]}", width=60)
+                    
+                plt.suptitle(wrapped_pred + "\n" + wrapped_refs, fontsize=12)
+                plt.tight_layout()
+                plt.savefig(os.path.join(viz_dir, f"{img_name}_epoch_{epoch}.png"))
+                plt.close(fig)
+            except Exception as e:
+                print(f"Visualization failed for sample {original_idx}: {e}")
+                
     res_m = meteor.compute(predictions=all_preds, references=all_refs)
     return {"METEOR": res_m['meteor'] * 100 if res_m else 0.0}
 
@@ -200,10 +253,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-4) # Higher LR for projector
     parser.add_argument("--llm_model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
     # This should be your saved BLIP model path, or default Huggingface BLIP if not trained
     parser.add_argument("--vision_model", type=str, default="Salesforce/blip-image-captioning-base")
+    parser.add_argument("--output_dir", type=str, default="../results")
     parser.add_argument("--mode", type=str, default="search", choices=["full", "search"])
     return parser.parse_args()
 
@@ -238,18 +293,32 @@ def main():
     print("Loading Model...")
     model = CustomVLM(vision_model_name=args.vision_model, llm_name=args.llm_model)
     
+    from transformers import get_cosine_schedule_with_warmup
     # Optimizer only on projector and lora params
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
     
+    accumulation_steps = args.gradient_accumulation
+    num_training_steps = (len(dataloader_train) // accumulation_steps) * args.epochs
+    num_warmup_steps = int(num_training_steps * 0.05)
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=num_warmup_steps, 
+        num_training_steps=num_training_steps
+    )
+    
     best_meteor = 0.0
+    clean_model_name = args.llm_model.replace("/", "_")
+    out_dir_base = os.path.join(args.output_dir, f"run_custom_vlm_{clean_model_name}_{args.mode}_{int(time.time())}")
+    os.makedirs(out_dir_base, exist_ok=True)
     
     for epoch in range(1, args.epochs + 1):
         print(f"\n--- Epoch {epoch}/{args.epochs} ---")
         model.train()
         total_loss = 0
+        optimizer.zero_grad()
         
-        for batch in tqdm(dataloader_train, desc="Training"):
+        for step, batch in enumerate(tqdm(dataloader_train, desc="Training")):
             pixel_values, input_ids, attention_mask, labels = batch
             
             outputs = model(
@@ -259,24 +328,28 @@ def main():
                 labels=labels
             )
             
-            loss = outputs.loss
-            optimizer.zero_grad()
+            loss = outputs.loss / accumulation_steps
             loss.backward()
-            optimizer.step()
             
-            total_loss += loss.item()
-            wandb.log({"train/step_loss": loss.item()})
+            if (step + 1) % accumulation_steps == 0 or (step + 1) == len(dataloader_train):
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+            
+            total_loss += (loss.item() * accumulation_steps)
+            wandb.log({"train/step_loss": loss.item() * accumulation_steps, "train/lr": lr_scheduler.get_last_lr()[0]})
             
         avg_train_loss = total_loss / len(dataloader_train)
         print(f"Train Loss: {avg_train_loss:.4f}")
         
-        metrics = eval_epoch(model, tokenizer, dataloader_valid)
+        metrics = eval_epoch(model, tokenizer, dataloader_valid, epoch, out_dir_base)
         print(f"Validation Metrics: {metrics}")
         wandb.log({"train/epoch_loss": avg_train_loss, "val/METEOR": metrics["METEOR"], "epoch": epoch})
         
         if metrics["METEOR"] > best_meteor:
             best_meteor = metrics["METEOR"]
-            save_dir = os.path.join("../results", f"best_custom_vlm_{args.mode}")
+            save_dir = os.path.join(args.output_dir, f"best_custom_vlm_{clean_model_name}_{args.mode}_epoch_{epoch}")
+            
             print(f"New best METEOR: {best_meteor}! Saving to {save_dir}...")
             os.makedirs(save_dir, exist_ok=True)
             # Save the trained specific parts manually
@@ -284,6 +357,9 @@ def main():
             torch.save(model.projector.state_dict(), os.path.join(save_dir, "projector.pt"))
             tokenizer.save_pretrained(save_dir)
             
+            with open(os.path.join(out_dir_base, "best_model_info.txt"), "w") as f:
+                f.write(f"Best Model Epoch: {epoch}\nMETEOR: {best_meteor}\nPath: {save_dir}\n")
+                
     wandb.finish()
 
 if __name__ == "__main__":
