@@ -37,3 +37,4 @@ The project is structured by weeks. Each week has its own directory and a `READM
 - **[Week 1: Object Detection and Fine-Tuning](./Week1/)** — Fine-tuning DETR, Faster R-CNN, RT-DETR, and YOLO models on KITTI-MOTS and DeART datasets.
 - **[Week 2: Object Segmentation](./Week2/)** — We use GroundingDINO and the Segment Anything Model (SAM) for semantic segmentation, as well as SAM mask decoder fine-tuning.
 - **[Week 3: Image Captioning](./Week3/)** — We develop encoder-decoder architectures (CNN+RNN, CLIP, xLSTM) to generate rich descriptive captions for VizWiz dataset.
+- **[Week 4: Vision-Language Models and PEFT](./Week4/)** — We first evaluate and fine-tune external pre-trained VLMs (BLIP, ViT-GPT2, ViT-BERT). Then, we build custom VLMs combining a frozen BLIP vision encoder and Qwen LLM decoders via an MLP projector. Involves two-stage training with LoRA and comprehensive qualitative evaluations on the VizWiz dataset.
