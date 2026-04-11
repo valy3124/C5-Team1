@@ -24,3 +24,7 @@ peft # For LoRA fine-tuning
 nltk
 rouge_score
 evaluate
+
+# Session 4
+safetensors
+accelerate
