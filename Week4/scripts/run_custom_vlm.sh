@@ -45,18 +45,19 @@ case $BEST_MODEL in
         ;;
 esac
 
-OUTPUT_DIR="/ghome/group01/C5/benet/C5-Team1/Week4/MODELS_ARRANGED/results"
+OUTPUT_DIR="/ghome/group01/C5/vali/C5-Team1/Week4/MODELS_ARRANGED/results"
 
 for LLM in "${MODELS_TO_FINETUNE[@]}"; do
     echo "======================================================================"
     echo "Finetuning custom VLM with frozen BLIP and $LLM decoder using LoRA..."
     echo "======================================================================"
     python src/train_custom_vlm.py \
-        --mode full \
+        --mode search \
         --vision_model "$VISION_MODEL" \
         --llm_model "$LLM" \
         --output_dir "$OUTPUT_DIR" \
-        --epochs 5 \
+        --stage1_epochs 3 \
+        --stage2_epochs 5 \
         --batch_size 4
 done
 
