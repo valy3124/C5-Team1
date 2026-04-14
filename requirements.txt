@@ -28,3 +28,8 @@ evaluate
 # Session 4
 safetensors
 accelerate
+
+# Session 5
+diffusers
+xformers
+datasets
