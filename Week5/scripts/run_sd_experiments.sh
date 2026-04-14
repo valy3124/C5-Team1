@@ -13,11 +13,9 @@ cd /ghome/group01/C5/vali/C5-Team1/Week5/src
 PROMPT="A highly detailed and majestic futuristic city covered in lush green vegetation, glowing neon lights, cinematic lighting, 8k resolution, photorealistic"
 
 MODELS=(
-    # "stabilityai/stable-diffusion-3.5-medium"
-    # "stabilityai/stable-diffusion-xl-base-1.0"
-    # "stabilityai/sdxl-turbo"
-    "stabilityai/stable-diffusion-3.5-large"
-    "stabilityai/stable-diffusion-3.5-large-turbo"
+    "runwayml/stable-diffusion-v1-5"
+    "stabilityai/stable-diffusion-xl-base-1.0"
+    "stabilityai/sdxl-turbo"
 )
 
 for MODEL in "${MODELS[@]}"; do

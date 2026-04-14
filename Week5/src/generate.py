@@ -5,7 +5,7 @@ from diffusers import DiffusionPipeline
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate images using Stable Diffusion models")
-    parser.add_argument("--model_id", type=str, default="stabilityai/stable-diffusion-2-1")
+    parser.add_argument("--model_id", type=str, default="runwayml/stable-diffusion-v1-5")
     parser.add_argument("--prompt", type=str, default="A beautiful sunset over a futuristic city, cyberpunk style")
     parser.add_argument("--output_path", type=str, default="../results/output.png")
     parser.add_argument("--num_inference_steps", type=int, default=50)
