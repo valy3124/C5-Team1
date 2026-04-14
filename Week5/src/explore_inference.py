@@ -41,35 +41,59 @@ def main():
         
         image.save(os.path.join(out_dir, f"{name}.png"))
 
-    print("Starting exploration tests...\n")
+    print("Starting SEQUENTIAL exploration tests...\n")
     
-    # --- EXPERIMENT 1: SCHEDULERS ---
-    print("=== Testing Schedulers ===")
-    generate("01_Scheduler_DDIM", DDIMScheduler)
-    generate("02_Scheduler_DDPM", DDPMScheduler)
+    # --- PHASE 1: FIND THE BEST SCHEDULER ---
+    # Everything else is standard.
+    print("=== PHASE 1: Testing Schedulers ===")
+    generate("Phase1_A_Scheduler_DDIM", scheduler_cls=DDIMScheduler, steps=50, cfg=7.5, negative_prompt=None)
+    generate("Phase1_B_Scheduler_DDPM", scheduler_cls=DDPMScheduler, steps=50, cfg=7.5, negative_prompt=None)
     
-    # Restore to DDIM for the rest of the tests for speed
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    # -> ASSUMED WINNER: DDIMScheduler (Fast, deterministic convergence)
+    best_scheduler = DDIMScheduler
+    pipe.scheduler = best_scheduler.from_config(pipe.scheduler.config)
 
-    # --- EXPERIMENT 2: DENOISING STEPS ---
-    print("=== Testing Steps ===")
-    generate("03_Steps_10", steps=10)
-    generate("04_Steps_20", steps=20)
-    generate("05_Steps_50", steps=50) # Same as baseline
-    generate("06_Steps_100", steps=100)
-
-    # --- EXPERIMENT 3: GUIDANCE SCALE (CFG) ---
-    print("=== Testing CFG ===")
-    generate("07_CFG_2.0", cfg=2.0)
-    generate("08_CFG_7.5", cfg=7.5) # Same as baseline
-    generate("09_CFG_15.0", cfg=15.0)
-
-    # --- EXPERIMENT 4: POSITIVE VS NEGATIVE PROMPTING ---
-    print("=== Testing Negative Prompts ===")
-    generate("10_Prompt_Without_Negative")
-    generate("11_Prompt_With_Negative", negative_prompt=neg_prompt)
+    # --- PHASE 2: FIND THE BEST DENOISING STEPS ---
+    # Using the best scheduler from Phase 1.
+    print("=== PHASE 2: Testing Steps (Using DDIM) ===")
+    generate("Phase2_A_Steps_10", steps=10, cfg=7.5, negative_prompt=None)
+    generate("Phase2_B_Steps_20", steps=20, cfg=7.5, negative_prompt=None)
+    generate("Phase2_C_Steps_50", steps=50, cfg=7.5, negative_prompt=None)
+    generate("Phase2_D_Steps_100", steps=100, cfg=7.5, negative_prompt=None)
     
-    print("\nExploration complete! Check Week5/visualizations/exploration/ for the results.")
+    # -> ASSUMED WINNER: 50 Steps (Best balance of quality vs compute time)
+    best_steps = 50
+
+    # --- PHASE 3: FIND THE BEST CFG SCALE ---
+    # Using the best scheduler and optimal steps from Phase 1 & 2.
+    print("=== PHASE 3: Testing CFG (Using DDIM + 50 Steps) ===")
+    generate("Phase3_A_CFG_2.0", steps=best_steps, cfg=2.0, negative_prompt=None)
+    generate("Phase3_B_CFG_7.5", steps=best_steps, cfg=7.5, negative_prompt=None)
+    generate("Phase3_C_CFG_15.0", steps=best_steps, cfg=15.0, negative_prompt=None)
+
+    # -> ASSUMED WINNER: 7.5 CFG (Best prompt adherence without burning out colors)
+    best_cfg = 7.5
+
+    # --- PHASE 4: NEGATIVE PROMPTING ---
+    # Using the optimized pipeline from Phases 1, 2, and 3.
+    print("=== PHASE 4: Testing Negative Prompts (Using DDIM + 50 Steps + 7.5 CFG) ===")
+    generate("Phase4_A_Without_Negative", steps=best_steps, cfg=best_cfg, negative_prompt=None)
+    generate("Phase4_B_With_Negative", steps=best_steps, cfg=best_cfg, negative_prompt=neg_prompt)
+    
+    # -> ASSUMED WINNER: With Negative Prompts (Removes blurry and deformed artifacts)
+    best_neg_prompt = neg_prompt
+
+    # --- ULTIMATE CONFIGURATION ---
+    print("=== FINAL: Generating Ultimate Configuration ===")
+    generate(
+        "ULTIMATE_CONFIGURATION", 
+        scheduler_cls=best_scheduler, 
+        steps=best_steps, 
+        cfg=best_cfg, 
+        negative_prompt=best_neg_prompt
+    )
+    
+    print("\nSequential Exploration complete! Check Week5/visualizations/exploration/ for the results.")
 
 if __name__ == "__main__":
     main()

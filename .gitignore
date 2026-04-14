@@ -16,6 +16,8 @@ Week3/dataset/
 Week3/results/
 Week3/logs/
 Week4/MODELS_ARRANGED/
+Week5/Exploration_VizWiz/
+Week5/VizWiz/
 *.jsonl
 *.log
 *.out
