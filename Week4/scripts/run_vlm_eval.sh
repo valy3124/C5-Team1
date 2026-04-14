@@ -23,15 +23,6 @@ mkdir -p logs
 # Run eval for all requested Qwen Models
 OUTPUT_DIR="/ghome/group01/C5/benet/C5-Team1/Week4/MODELS_ARRANGED/results"
 
-echo "Evaluating Qwen2-VL-7B-Instruct..."
-python src/evaluate_llm.py --model_type Qwen2-VL-7B-Instruct --mode full --output_dir $OUTPUT_DIR
-
-echo "Evaluating Qwen2.5-VL-7B-Instruct..."
-python src/evaluate_llm.py --model_type Qwen2.5-VL-7B-Instruct --mode full --output_dir $OUTPUT_DIR
-
-echo "Evaluating Qwen3-VL-8B-Instruct..."
-python src/evaluate_llm.py --model_type Qwen3-VL-8B-Instruct --mode full --output_dir $OUTPUT_DIR
-
 echo "Evaluating Qwen3.5-9B..."
 python src/evaluate_llm.py --model_type Qwen3.5-9B --mode full --output_dir $OUTPUT_DIR
 

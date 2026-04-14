@@ -131,8 +131,19 @@ def generate_caption(img, model, processor, model_type, max_tokens):
             out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
         
-        generated_texts = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-        out_text = generated_texts[0].strip()
+        full_text = processor.batch_decode(generated_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)[0]
+        
+        if "<|im_start|>assistant\n" in full_text:
+            out_text = full_text.split("<|im_start|>assistant\n")[-1]
+        elif "<|im_start|> assistant\n" in full_text:
+            out_text = full_text.split("<|im_start|> assistant\n")[-1]
+        elif "assistant\n" in full_text:
+            out_text = full_text.split("assistant\n")[-1]
+        else:
+            generated_texts = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+            out_text = generated_texts[0]
+            
+        out_text = out_text.replace("<|im_end|>", "").strip()
         
         # If output contains a thinking block, strip it out completely
         import re
