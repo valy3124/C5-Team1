@@ -32,7 +32,7 @@ def main():
     pipe = DiffusionPipeline.from_pretrained(
         args.model_id,
         torch_dtype=torch.float16,
-     )
+    )
     
     # Enable aggressive CPU offload instead of moving the entire pipeline to GPU.
     # This prevents Out Of Memory errors when loading massive models like SD 3.5 on single GPUs
