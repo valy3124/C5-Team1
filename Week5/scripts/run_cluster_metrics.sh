@@ -12,8 +12,11 @@ source /ghome/group01/miniconda3/bin/activate c5
 
 # Optional: Add any pre-requisites
 SPLIT=$1
+MODEL_PATH=${2:-"/ghome/group01/C5/benet/C5-Team1/Week5/models/finetune_blip_both-finetune_full_20260324_220017/best_model"}
+OUTPUT_SUFFIX=${3:-""}
+
 if [ -z "$SPLIT" ]; then
-    echo "Usage: sbatch run_cluster_metrics.sh <train|val>"
+    echo "Usage: sbatch run_cluster_metrics.sh <train|val> [model_path] [output_suffix]"
     exit 1
 fi
 
@@ -25,5 +28,7 @@ fi
 
 echo "Running cluster metrics evaluation for split: $SPLIT"
 echo "Using CSV: $CSV_PATH"
+echo "Model Path: $MODEL_PATH"
+echo "Suffix: $OUTPUT_SUFFIX"
 
-python ../src/cluster_metrics.py --split $SPLIT --csv_path "$CSV_PATH"
+python ../src/cluster_metrics.py --split $SPLIT --csv_path "$CSV_PATH" --model_path "$MODEL_PATH" --output_suffix "$OUTPUT_SUFFIX"

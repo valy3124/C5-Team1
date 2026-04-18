@@ -32,9 +32,10 @@ def parse_args():
                         help="Path to the trained model directory")
     parser.add_argument("--split", type=str, required=True, choices=["train", "val"])
     parser.add_argument("--csv_path", type=str, required=True, help="Path to input cluster assignments CSV")
-    parser.add_argument("--data_dir", type=str, default="/ghome/group01/C5/vali/C5-Team1/Week3/dataset/VizWiz")
+    parser.add_argument("--data_dir", type=str, default="/ghome/group01/C5/dataset/VizWiz")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--output_suffix", type=str, default="", help="Suffix to append to output csv files")
     return parser.parse_args()
 
 def main():
@@ -150,7 +151,7 @@ def main():
     df['PREDICTION'] = df['filename'].map(lambda x: results_dict.get(x, {}).get('PREDICTION', ""))
 
     # Save enriched samples CSV
-    samples_out = args.csv_path.replace('.csv', '_with_metrics.csv')
+    samples_out = args.csv_path.replace('.csv', f'_with_metrics{args.output_suffix}.csv')
     df.to_csv(samples_out, index=False)
     print(f"Saved enriched samples to {samples_out}")
     
@@ -164,7 +165,7 @@ def main():
     # Sort descending by METEOR
     cluster_stats = cluster_stats.sort_values(by='METEOR', ascending=False)
     
-    agg_out = args.csv_path.replace('.csv', '_cluster_averages.csv')
+    agg_out = args.csv_path.replace('.csv', f'_cluster_averages{args.output_suffix}.csv')
     cluster_stats.to_csv(agg_out, index=False)
     print(f"Saved cluster aggregations to {agg_out}")
 
