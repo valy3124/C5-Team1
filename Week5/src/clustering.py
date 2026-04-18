@@ -539,44 +539,125 @@ def run_streamlit(embeddings_path: str, val_embeddings_path: str, data_dir: str,
     # Explore images
     st.subheader("Explore images by cluster")
 
-    col1, col2 = st.columns([1, 1])
+    # ── Generated-clusters discovery ──────────────────────────────────────────
+    st.sidebar.header("Generated Images")
+    generated_base_default = "/ghome/group01/C5/vali/C5-Team1/Week5/visualizations"
+    generated_base = st.sidebar.text_input(
+        "Generated clusters base directory",
+        value=generated_base_default,
+        help="Parent folder that contains generated_clusters*, generated_clusters2, etc."
+    )
 
-    with col1:
-        browse_cluster = st.selectbox("Select cluster to browse", all_clusters)
-        cluster_rows = df[df["cluster"] == browse_cluster]
+    # Discover all generated_clusters* subdirs inside generated_base
+    available_models: dict[str, str] = {}  # display_name -> full path
+    if os.path.isdir(generated_base):
+        for entry in sorted(os.listdir(generated_base)):
+            full = os.path.join(generated_base, entry)
+            if os.path.isdir(full) and entry.startswith("generated_clusters"):
+                # Use folder name as display label
+                label = entry.replace("generated_clusters", "").strip("_") or "default"
+                available_models[entry] = full
 
-        n_per_page = st.slider("Images per page", 5, 50, 20)
-        total_pages = max(1, (len(cluster_rows) + n_per_page - 1) // n_per_page)
-        page = st.number_input("Page", 1, total_pages, 1) - 1
+    selected_models: list[str] = []
+    if available_models:
+        selected_models = st.sidebar.multiselect(
+            "Filter by model / run",
+            options=list(available_models.keys()),
+            default=list(available_models.keys()),
+            help="Each folder under the base directory represents a different model or generation run."
+        )
+    else:
+        st.sidebar.info("No generated_clusters* folders found in the specified base directory.")
+    # ─────────────────────────────────────────────────────────────────────────
 
-        start = page * n_per_page
-        end = min(start + n_per_page, len(cluster_rows))
-        st.write(f"Showing {start + 1}–{end} of {len(cluster_rows)} images in cluster {browse_cluster}")
+    browse_cluster = st.selectbox("Select cluster to browse", all_clusters)
+    cluster_rows = df[df["cluster"] == browse_cluster]
 
-        cols = st.columns(5)
-        for i, (_, row) in enumerate(cluster_rows[start:end].iterrows()):
+    n_per_page = st.slider("Images per page", 5, 50, 20)
+    total_pages = max(1, (len(cluster_rows) + n_per_page - 1) // n_per_page)
+    page = st.number_input("Page", 1, total_pages, 1) - 1
+    start = page * n_per_page
+    end = min(start + n_per_page, len(cluster_rows))
+
+    # ── Train / Val samples ──────────────────────────────────────────────────
+    train_rows = cluster_rows[cluster_rows["split"] == "train"].iloc[start:end]
+    val_rows   = cluster_rows[cluster_rows["split"] == "val"].iloc[start:end]
+
+    st.markdown(f"#### 🗂️ Train samples — cluster **{browse_cluster}**")
+    st.caption(f"Showing {start + 1}–{end} of {len(cluster_rows[cluster_rows['split']=='train'])} train images")
+
+    if not train_rows.empty:
+        cols_train = st.columns(5)
+        for i, (_, row) in enumerate(train_rows.iterrows()):
+            img_path = os.path.join(data_dir, row["filename"])
+            with cols_train[i % 5]:
+                if os.path.exists(img_path):
+                    st.image(img_path, caption=row["filename"], width=150)
+                else:
+                    st.warning(f"Not found:\n{row['filename']}")
+    else:
+        st.info("No train images for this cluster.")
+
+    if val_rows is not None and not val_rows.empty and val_data_dir:
+        st.markdown(f"#### 🔍 Validation samples — cluster **{browse_cluster}**")
+        cols_val = st.columns(5)
+        for i, (_, row) in enumerate(val_rows.iterrows()):
+            img_path = os.path.join(val_data_dir, row["filename"])
+            with cols_val[i % 5]:
+                if os.path.exists(img_path):
+                    st.image(img_path, caption=row["filename"], width=150)
+                else:
+                    st.warning(f"Not found:\n{row['filename']}")
+
+    # ── Generated images per model ───────────────────────────────────────────
+    st.markdown(f"#### 🎨 Generated images — cluster **{browse_cluster}**")
+
+    cluster_folder_name = f"cluster_{browse_cluster}"
+
+    models_with_images = []
+    for folder_key in selected_models:
+        folder_path = available_models[folder_key]
+        cluster_path = os.path.join(folder_path, cluster_folder_name)
+        if os.path.isdir(cluster_path):
+            imgs = sorted(
+                [f for f in os.listdir(cluster_path) if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))],
+                key=lambda x: int(''.join(filter(str.isdigit, x)) or 0)
+            )
+            if imgs:
+                models_with_images.append((folder_key, cluster_path, imgs))
+
+    if not models_with_images:
+        st.info(
+            f"No generated images found for cluster **{browse_cluster}** "
+            f"in the selected model folders. "
+            f"(Looking for `{cluster_folder_name}` inside each selected folder.)"
+        )
+    else:
+        tab_labels = [k for k, _, _ in models_with_images]
+        tabs = st.tabs(tab_labels)
+        for tab, (folder_key, cluster_path, imgs) in zip(tabs, models_with_images):
+            with tab:
+                st.caption(f"📁 `{cluster_path}` — {len(imgs)} generated image(s)")
+                gen_cols = st.columns(5)
+                for j, fname in enumerate(imgs[:n_per_page]):
+                    img_full = os.path.join(cluster_path, fname)
+                    with gen_cols[j % 5]:
+                        st.image(img_full, caption=fname, width=150)
+
+    # ── Search by filename ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**🔎 Search by filename**")
+    search = st.text_input("Filename (partial match)")
+    if search:
+        matches = df[df["filename"].str.contains(search, case=False)]
+        st.write(f"Found {len(matches)} matches")
+        search_cols = st.columns(5)
+        for idx, (_, row) in enumerate(matches.head(10).iterrows()):
             base_dir = data_dir if row["split"] == "train" else val_data_dir
             if base_dir is None:
                 continue
             img_path = os.path.join(base_dir, row["filename"])
-            if os.path.exists(img_path):
-                with cols[i % 5]:
-                    st.image(img_path, caption=f"{row['filename']} ({row['split']})", width=150)
-            else:
-                with cols[i % 5]:
-                    st.warning(f"Image not found: {img_path}")
-
-    with col2:
-        st.markdown("**Search by filename**")
-        search = st.text_input("Filename (partial match)")
-        if search:
-            matches = df[df["filename"].str.contains(search, case=False)]
-            st.write(f"Found {len(matches)} matches")
-            for _, row in matches.head(10).iterrows():
-                base_dir = data_dir if row["split"] == "train" else val_data_dir
-                if base_dir is None:
-                    continue
-                img_path = os.path.join(base_dir, row["filename"])
+            with search_cols[idx % 5]:
                 if os.path.exists(img_path):
                     st.image(
                         img_path,
@@ -584,7 +665,7 @@ def run_streamlit(embeddings_path: str, val_embeddings_path: str, data_dir: str,
                         width=200,
                     )
                 else:
-                    st.warning(f"Image not found: {img_path}")
+                    st.warning(f"Not found:\n{row['filename']}")
 
     # Export
     st.sidebar.header("Export")
