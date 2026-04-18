@@ -21,6 +21,7 @@ Week5/VizWiz/
 Week5/embeddings/
 Week5/models/
 Week5/visualizations/
+Week5/logs/
 *.jsonl
 *.log
 *.out

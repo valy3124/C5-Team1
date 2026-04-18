@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=generate_clusters
-#SBATCH -p mhigh
-#SBATCH -q masterhigh
+#SBATCH -p mlow
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --time=13:00:00

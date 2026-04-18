@@ -1,7 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=sd_explore
-#SBATCH -p mlow
-#SBATCH --gres=gpu:2
+#SBATCH --job-name=NOT_YOUR_BUSINESS
+#SBATCH -p mhigh
+#SBATCH -q masterhigh
+#SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/sd_explore_%j.out

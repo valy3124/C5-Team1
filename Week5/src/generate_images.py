@@ -5,7 +5,7 @@ from diffusers import DiffusionPipeline, DDIMScheduler
 
 def main():
     model_id = "stabilityai/sdxl-turbo"
-    out_dir = "../visualizations/generated_clusters2S0CFG"
+    out_dir = "../visualizations/generated_clusters4S1CFG"
     os.makedirs(out_dir, exist_ok=True)
     
     print(f"Loading {model_id}...")
@@ -36,16 +36,21 @@ def main():
         cluster_dir = os.path.join(out_dir, f"cluster_{cluster_id}")
         os.makedirs(cluster_dir, exist_ok=True)
         
+        # Check if the image to skip regenerated already
+        save_path = os.path.join(cluster_dir, f"image_{idx}.png")
+        if os.path.exists(save_path):
+            print(f"Skipping Image {idx + 1}, already exists.")
+            continue
+        
         # Generate the image without fixing the seed (random each time)
         image = pipe(
             prompt=current_prompt,
             negative_prompt="professional photography, DSLR, 4k, 8k, highly detailed, studio lighting, bokeh, shallow depth of field, perfect composition, centered, artistic, stock photo, watermark",
-            num_inference_steps=2, # 4 steps gives the best quality for Turbo!
-            guidance_scale=0.0 # 1.0 is optimal for Turbo (disables CFG)
+            num_inference_steps=4, # 4 steps gives the best quality for Turbo!
+            guidance_scale=1.0 # 1.0 is optimal for Turbo (disables CFG)
         ).images[0]
         
         # Save image
-        save_path = os.path.join(cluster_dir, f"image_{idx}.png")
         image.save(save_path)
         
     print(f"All images generated and saved to {out_dir}")

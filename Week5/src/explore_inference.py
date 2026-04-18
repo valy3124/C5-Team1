@@ -3,10 +3,27 @@ import torch
 from diffusers import DiffusionPipeline, DDIMScheduler, DDPMScheduler, EulerDiscreteScheduler, DPMSolverMultistepScheduler
 
 def main():
+    # Configuration toggle for flexibility ("TURBO", "SDXL", or "SD1.5")
+    MODEL_TYPE = "SD1.5"
+
+    if MODEL_TYPE == "TURBO":
+        model_id = "stabilityai/sdxl-turbo"
+        out_dir = "../visualizations/exploration_turbo"
+        base_steps = 2
+        base_cfg = 0.0
+    elif MODEL_TYPE == "SD1.5":
+        model_id = "runwayml/stable-diffusion-v1-5"
+        out_dir = "../visualizations/exploration_sd15"
+        base_steps = 75
+        base_cfg = 7.5
+    else:
+        model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+        out_dir = "../visualizations/exploration"
+        base_steps = 50
+        base_cfg = 7.5
+
     # We will use SDXL as our base for exploration
     # It is from StabilityAI and is a perfect discrete diffusion model for Tasks like DDPM vs DDIM, CFG, etc.
-    model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-    out_dir = "../visualizations/exploration"
     os.makedirs(out_dir, exist_ok=True)
     
     print(f"Loading {model_id}...")
@@ -28,7 +45,15 @@ def main():
     
     seed = 42 # Keeping the seed constant is CRITICAL for comparison!
 
-    def generate(name, current_prompt, scheduler_cls=None, steps=50, cfg=7.5, negative_prompt=None):
+    def generate(name, current_prompt, scheduler_cls=None, steps=None, cfg=None, negative_prompt=None):
+        if steps is None: steps = base_steps
+        if cfg is None: cfg = base_cfg
+        
+        # Strictly override if forcing turbo mode
+        if MODEL_TYPE == "TURBO":
+            steps = 2
+            cfg = 0.0
+            
         print(f"Generating: {name}")
         
         # Swap the scheduler if requested
@@ -59,10 +84,10 @@ def main():
         # --- PHASE 1: FIND THE BEST SCHEDULER ---
         # Added Euler and DPM++ 2M (The fastest and most popular SDXL continuous schedulers!)
         print(f"=== PHASE 1: Testing Schedulers ({prompt_name}) ===")
-        # generate(f"{prompt_name}_Phase1_A_Scheduler_DDIM", prompt_text, scheduler_cls=DDIMScheduler, steps=50, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase1_B_Scheduler_DDPM", prompt_text, scheduler_cls=DDPMScheduler, steps=50, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase1_C_Scheduler_Euler", prompt_text, scheduler_cls=EulerDiscreteScheduler, steps=50, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase1_D_Scheduler_DPMMultistep", prompt_text, scheduler_cls=DPMSolverMultistepScheduler, steps=50, cfg=7.5, negative_prompt=None)
+        generate(f"{prompt_name}_Phase1_A_Scheduler_DDIM", prompt_text, scheduler_cls=DDIMScheduler, steps=base_steps, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase1_B_Scheduler_DDPM", prompt_text, scheduler_cls=DDPMScheduler, steps=base_steps, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase1_C_Scheduler_Euler", prompt_text, scheduler_cls=EulerDiscreteScheduler, steps=base_steps, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase1_D_Scheduler_DPMMultistep", prompt_text, scheduler_cls=DPMSolverMultistepScheduler, steps=base_steps, cfg=base_cfg, negative_prompt=None)
         
         # -> ASSUMED WINNER: DDIMScheduler (User preference)
         best_scheduler = DDIMScheduler
@@ -71,37 +96,37 @@ def main():
         # --- PHASE 2: FIND THE BEST DENOISING STEPS ---
         # Added extremely low (5) and extremely high (150) step counts to observe limits
         print(f"=== PHASE 2: Testing Steps (Using DDIM) ===")
-        # generate(f"{prompt_name}_Phase2_A_Steps_05", prompt_text, steps=5, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase2_B_Steps_10", prompt_text, steps=10, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase2_C_Steps_20", prompt_text, steps=20, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase2_D_Steps_50", prompt_text, steps=50, cfg=7.5, negative_prompt=None)
-        generate(f"{prompt_name}_Phase2_H_Steps_75", prompt_text, steps=75, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase2_E_Steps_100", prompt_text, steps=100, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase2_F_Steps_150", prompt_text, steps=150, cfg=7.5, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_A_Steps_05", prompt_text, steps=5, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_B_Steps_10", prompt_text, steps=10, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_C_Steps_20", prompt_text, steps=20, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_D_Steps_50", prompt_text, steps=50, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_H_Steps_75", prompt_text, steps=75, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_E_Steps_100", prompt_text, steps=100, cfg=base_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase2_F_Steps_150", prompt_text, steps=150, cfg=base_cfg, negative_prompt=None)
         
         # -> ASSUMED WINNER: 50 Steps (Perfect balance for SDXL with DDIM)
-        best_steps = 50
+        best_steps = base_steps
 
         # --- PHASE 3: FIND THE BEST CFG SCALE ---
         # Added unconditional (1.0) and super-heavy conditioning (10.0, 25.0)
         print(f"=== PHASE 3: Testing CFG (Using DDIM + 50 Steps) ===")
-        # generate(f"{prompt_name}_Phase3_A_CFG_1.0", prompt_text, steps=best_steps, cfg=1.0, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase3_B_CFG_2.0", prompt_text, steps=best_steps, cfg=2.0, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase3_C_CFG_5.0", prompt_text, steps=best_steps, cfg=5.0, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase3_D_CFG_7.5", prompt_text, steps=best_steps, cfg=7.5, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase3_E_CFG_10.0", prompt_text, steps=best_steps, cfg=10.0, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase3_F_CFG_15.0", prompt_text, steps=best_steps, cfg=15.0, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase3_G_CFG_25.0", prompt_text, steps=best_steps, cfg=25.0, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_A_CFG_1.0", prompt_text, steps=best_steps, cfg=1.0, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_B_CFG_2.0", prompt_text, steps=best_steps, cfg=2.0, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_C_CFG_5.0", prompt_text, steps=best_steps, cfg=5.0, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_D_CFG_7.5", prompt_text, steps=best_steps, cfg=7.5, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_E_CFG_10.0", prompt_text, steps=best_steps, cfg=10.0, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_F_CFG_15.0", prompt_text, steps=best_steps, cfg=15.0, negative_prompt=None)
+        generate(f"{prompt_name}_Phase3_G_CFG_25.0", prompt_text, steps=best_steps, cfg=25.0, negative_prompt=None)
 
         # -> ASSUMED WINNER: 7.5 CFG (Best prompt adherence without burning out colors)
-        best_cfg = 7.5
+        best_cfg = base_cfg
 
         # --- PHASE 4: NEGATIVE PROMPTING ---
         # Added a "Light" negative prompt to compare against our "Heavy" VizWiz specific prompt
         print(f"=== PHASE 4: Testing Negative Prompts (Using DDIM + 50 Steps + 7.5 CFG) ===")
-        # generate(f"{prompt_name}_Phase4_A_Without_Negative", prompt_text, steps=best_steps, cfg=best_cfg, negative_prompt=None)
-        # generate(f"{prompt_name}_Phase4_B_Light_Negative", prompt_text, steps=best_steps, cfg=best_cfg, negative_prompt="bad quality, ugly")
-        # generate(f"{prompt_name}_Phase4_C_Heavy_Negative", prompt_text, steps=best_steps, cfg=best_cfg, negative_prompt=vz_neg_prompt)
+        generate(f"{prompt_name}_Phase4_A_Without_Negative", prompt_text, steps=best_steps, cfg=best_cfg, negative_prompt=None)
+        generate(f"{prompt_name}_Phase4_B_Light_Negative", prompt_text, steps=best_steps, cfg=best_cfg, negative_prompt="bad quality, ugly")
+        generate(f"{prompt_name}_Phase4_C_Heavy_Negative", prompt_text, steps=best_steps, cfg=best_cfg, negative_prompt=vz_neg_prompt)
         
         # -> ASSUMED WINNER: With Heavy Negative Prompts (Removes blurry and deformed artifacts)
         best_neg_prompt = vz_neg_prompt

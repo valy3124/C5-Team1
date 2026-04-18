@@ -33,3 +33,4 @@ accelerate
 diffusers
 xformers
 datasets
+streamlit
