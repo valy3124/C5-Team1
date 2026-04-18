@@ -19,12 +19,12 @@ Week4/MODELS_ARRANGED/
 Week5/Exploration_VizWiz/
 Week5/VizWiz/
 Week5/embeddings/
+Week5/models/
 *.jsonl
 *.log
 *.out
 *.err
 *.jpg
-*.npz
 
 # Weights & Biases local files
 wandb/
